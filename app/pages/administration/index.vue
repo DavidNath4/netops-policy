@@ -1,23 +1,27 @@
 <script setup lang="ts">
-// Administration / User Mapping page (default layout, mock data), restyled to
-// the Figma "Network ops app" design language.
+// Administration / User Mapping page — real backend (RBAC-guarded).
 //
-// Lists users in a table (Username, Name, Role, Status, Action) with rows
-// rendered as white panels (border-line, rounded), status as colored text,
-// plus loading / empty / error states and pagination bound to the total count.
-// The Action cell exposes per-row controls that open dialogs:
-//   - Add User      (username, displayName, password, roleCode) -> users.create
-//   - Edit          (displayName)                               -> users.update
-//   - Change Role   (roleCode)                                  -> users.changeRole
-//   - Change Status (enable / disable; ConfirmDialog on disable) -> users.setStatus
-//   - Reset Password(ConfirmDialog + new password)              -> users.resetPassword
-// After any successful mutation the list is reloaded so the table stays in sync.
+// Lists users (Email, Name, Role, Status, Action) with loading/empty/error
+// states and pagination. Per-row actions open dialogs:
+//   - Add User      (email, displayName, password, roleCode) -> users.create
+//   - Edit          (displayName)                            -> users.update
+//   - Change Role   (roleCode)                               -> users.changeRole
+//   - Change Status (enable / disable; confirm on disable)   -> users.setStatus
+//   - Reset Password(confirm + new password)                 -> users.resetPassword
+// The list reloads after any successful mutation.
 //
-// Requirements: 3.1-3.6 (user CRUD + role/status/reset), 13.1-13.4 (confirmations).
-import type { RoleCode, UserResponse, UserStatus } from '~/utils/api-types'
+// One role per user (roleCode/roleName from the roles table); email is the
+// identifier; isActive is the status. Every mutating control is gated by
+// ADMINISTRATION_MANAGE; the page/list needs ADMINISTRATION_SHOW.
+import type { RoleOption, UserResponse } from '~/utils/api-types'
 
-const { users } = useApi()
+definePageMeta({ middleware: 'permission', permission: 'ADMINISTRATION_SHOW' })
+
+const { users, roles: rolesApi } = useApi()
+const { can } = usePermissions()
 const toast = useToast()
+
+const canManage = computed(() => can('ADMINISTRATION_MANAGE'))
 
 // ---------------------------------------------------------------------------
 // List state + loading
@@ -49,14 +53,30 @@ async function load() {
 onMounted(load)
 watch(page, load)
 
-const ROLE_OPTIONS: { label: string, value: RoleCode }[] = [
-  { label: 'Administrator', value: 'ADMIN' },
-  { label: 'L2 Engineer', value: 'L2' },
-  { label: 'NOC', value: 'NOC' },
-]
+// ---------------------------------------------------------------------------
+// Role options (loaded from the server; roles are data, not hardcoded)
+// ---------------------------------------------------------------------------
+const roleOptions = ref<{ label: string, value: string }[]>([])
 
-function rolesLabel(roles: RoleCode[]): string {
-  return roles.length ? roles.join(', ') : '—'
+async function loadRoles() {
+  try {
+    const res = await rolesApi.list()
+    roleOptions.value = res.roles.map((r: RoleOption) => ({ label: r.roleName, value: r.roleCode }))
+  }
+  catch {
+    roleOptions.value = []
+  }
+}
+onMounted(loadRoles)
+
+const defaultRoleCode = computed(() => roleOptions.value[0]?.value ?? '')
+
+function roleLabel(user: UserResponse): string {
+  return user.roleName ?? user.roleCode ?? '—'
+}
+
+function statusOf(user: UserResponse): string {
+  return user.isActive ? 'ACTIVE' : 'DISABLED'
 }
 
 const skeletonRows = computed(() => Array.from({ length: 5 }, (_, i) => i))
@@ -67,27 +87,29 @@ const skeletonRows = computed(() => Array.from({ length: 5 }, (_, i) => i))
 const addOpen = ref(false)
 const addSubmitting = ref(false)
 const addForm = reactive({
-  username: '',
+  email: '',
   displayName: '',
   password: '',
-  roleCode: 'NOC' as RoleCode,
+  roleCode: '',
 })
 const addErrors = reactive<Record<string, string>>({})
 
 function openAdd() {
-  addForm.username = ''
+  addForm.email = ''
   addForm.displayName = ''
   addForm.password = ''
-  addForm.roleCode = 'NOC'
+  addForm.roleCode = defaultRoleCode.value
   clearErrors(addErrors)
   addOpen.value = true
 }
 
 function validateAdd(): boolean {
   clearErrors(addErrors)
-  if (!addForm.username.trim()) addErrors.username = 'Username is required.'
+  if (!addForm.email.trim()) addErrors.email = 'Email is required.'
   if (!addForm.displayName.trim()) addErrors.displayName = 'Name is required.'
   if (!addForm.password) addErrors.password = 'Password is required.'
+  else if (addForm.password.length < 8) addErrors.password = 'Password must be at least 8 characters.'
+  if (!addForm.roleCode) addErrors.roleCode = 'Role is required.'
   return Object.keys(addErrors).length === 0
 }
 
@@ -96,7 +118,7 @@ async function submitAdd() {
   addSubmitting.value = true
   try {
     await users.create({
-      username: addForm.username.trim(),
+      email: addForm.email.trim(),
       displayName: addForm.displayName.trim(),
       password: addForm.password,
       roleCode: addForm.roleCode,
@@ -105,8 +127,8 @@ async function submitAdd() {
     notifySuccess('User created')
     await load()
   }
-  catch {
-    notifyError('Could not create the user.')
+  catch (err) {
+    notifyError(errorMessage(err, 'Could not create the user.'))
   }
   finally {
     addSubmitting.value = false
@@ -139,13 +161,13 @@ async function submitEdit() {
   if (!target) return
   editSubmitting.value = true
   try {
-    await users.update(target.id, { displayName: editForm.displayName.trim() })
+    await users.update(target.userId, { displayName: editForm.displayName.trim() })
     editOpen.value = false
     notifySuccess('User updated')
     await load()
   }
-  catch {
-    notifyError('Could not update the user.')
+  catch (err) {
+    notifyError(errorMessage(err, 'Could not update the user.'))
   }
   finally {
     editSubmitting.value = false
@@ -158,36 +180,34 @@ async function submitEdit() {
 const roleOpen = ref(false)
 const roleSubmitting = ref(false)
 const roleTarget = ref<UserResponse | null>(null)
-const roleForm = reactive({ roleCode: 'NOC' as RoleCode })
+const roleForm = reactive({ roleCode: '' })
 
 function openChangeRole(user: UserResponse) {
   roleTarget.value = user
-  roleForm.roleCode = user.roles[0] ?? 'NOC'
+  roleForm.roleCode = user.roleCode ?? defaultRoleCode.value
   roleOpen.value = true
 }
 
-// First letter of the target's display name (or username) for the summary avatar.
 const roleTargetInitial = computed(() => {
   const t = roleTarget.value
-  const source = t?.displayName || t?.username || ''
+  const source = t?.displayName || t?.email || ''
   return source.trim().charAt(0).toUpperCase() || '?'
 })
 
-// Current role label of the target user, shown as a badge in the summary.
-const roleTargetCurrentRole = computed(() => roleTarget.value?.roles[0] ?? '—')
+const roleTargetCurrentRole = computed(() => roleTarget.value?.roleName ?? roleTarget.value?.roleCode ?? '—')
 
 async function submitChangeRole() {
   const target = roleTarget.value
-  if (!target) return
+  if (!target || !roleForm.roleCode) return
   roleSubmitting.value = true
   try {
-    await users.changeRole(target.id, roleForm.roleCode)
+    await users.changeRole(target.userId, roleForm.roleCode)
     roleOpen.value = false
     notifySuccess('Role updated')
     await load()
   }
-  catch {
-    notifyError('Could not change the role.')
+  catch (err) {
+    notifyError(errorMessage(err, 'Could not change the role.'))
   }
   finally {
     roleSubmitting.value = false
@@ -201,15 +221,15 @@ const disableConfirmOpen = ref(false)
 const statusSubmitting = ref(false)
 const statusTarget = ref<UserResponse | null>(null)
 
-async function setStatus(user: UserResponse, status: UserStatus) {
+async function setStatus(user: UserResponse, isActive: boolean) {
   statusSubmitting.value = true
   try {
-    await users.setStatus(user.id, status)
-    notifySuccess(status === 'ACTIVE' ? 'User enabled' : 'User disabled')
+    await users.setStatus(user.userId, isActive)
+    notifySuccess(isActive ? 'User enabled' : 'User disabled')
     await load()
   }
-  catch {
-    notifyError('Could not change the status.')
+  catch (err) {
+    notifyError(errorMessage(err, 'Could not change the status.'))
   }
   finally {
     statusSubmitting.value = false
@@ -217,20 +237,20 @@ async function setStatus(user: UserResponse, status: UserStatus) {
 }
 
 function onToggleStatus(user: UserResponse) {
-  if (user.status === 'ACTIVE') {
+  if (user.isActive) {
     // Disabling is destructive -> confirm first.
     statusTarget.value = user
     disableConfirmOpen.value = true
   }
   else {
-    void setStatus(user, 'ACTIVE')
+    void setStatus(user, true)
   }
 }
 
 async function confirmDisable() {
   const target = statusTarget.value
   if (!target) return
-  await setStatus(target, 'DISABLED')
+  await setStatus(target, false)
   disableConfirmOpen.value = false
 }
 
@@ -262,16 +282,20 @@ async function submitReset() {
     resetErrors.password = 'New password is required.'
     return
   }
+  if (resetForm.password.length < 8) {
+    resetErrors.password = 'Password must be at least 8 characters.'
+    return
+  }
   const target = resetTarget.value
   if (!target) return
   resetSubmitting.value = true
   try {
-    await users.resetPassword(target.id, resetForm.password)
+    await users.resetPassword(target.userId, resetForm.password)
     resetFormOpen.value = false
     notifySuccess('Password reset')
   }
-  catch {
-    notifyError('Could not reset the password.')
+  catch (err) {
+    notifyError(errorMessage(err, 'Could not reset the password.'))
   }
   finally {
     resetSubmitting.value = false
@@ -279,7 +303,7 @@ async function submitReset() {
 }
 
 // ---------------------------------------------------------------------------
-// Row action menu (extra actions beyond "Edit Role")
+// Row action menu (only when the user can manage)
 // ---------------------------------------------------------------------------
 function rowMenuItems(user: UserResponse) {
   return [
@@ -290,8 +314,8 @@ function rowMenuItems(user: UserResponse) {
         onSelect: () => openEdit(user),
       },
       {
-        label: user.status === 'ACTIVE' ? 'Disable' : 'Enable',
-        icon: user.status === 'ACTIVE' ? 'i-lucide-user-x' : 'i-lucide-user-check',
+        label: user.isActive ? 'Disable' : 'Enable',
+        icon: user.isActive ? 'i-lucide-user-x' : 'i-lucide-user-check',
         onSelect: () => onToggleStatus(user),
       },
       {
@@ -310,6 +334,11 @@ function clearErrors(target: Record<string, string>) {
   for (const key of Object.keys(target)) delete target[key]
 }
 
+function errorMessage(err: unknown, fallback: string): string {
+  const msg = (err as { data?: { error?: { message?: string } } })?.data?.error?.message
+  return msg ?? fallback
+}
+
 function notifySuccess(title: string) {
   toast.add({ title, color: 'success', icon: 'i-lucide-check' })
 }
@@ -326,7 +355,7 @@ function notifyError(description: string) {
     <!-- User Mapping section -->
     <div class="flex items-center justify-between gap-4">
       <h2 class="text-[17px] font-semibold text-ink">User Mapping</h2>
-      <UButton icon="i-lucide-plus" label="Add User" @click="openAdd" />
+      <UButton v-if="canManage" icon="i-lucide-plus" label="Add User" @click="openAdd" />
     </div>
 
     <ErrorState
@@ -336,14 +365,14 @@ function notifyError(description: string) {
     />
 
     <template v-else>
-      <!-- Empty state (outside the card, like other pages) -->
+      <!-- Empty state -->
       <EmptyState
         v-if="!pending && rows.length === 0"
         title="No users yet"
         description="Add a user to get started."
         icon="i-lucide-users"
       >
-        <template #action>
+        <template v-if="canManage" #action>
           <UButton icon="i-lucide-plus" label="Add User" @click="openAdd" />
         </template>
       </EmptyState>
@@ -354,9 +383,9 @@ function notifyError(description: string) {
           <div class="min-w-[640px]">
             <!-- Column headers -->
             <div
-              class="grid grid-cols-[1.2fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line bg-surface px-4 py-3"
+              class="grid grid-cols-[1.4fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line bg-surface px-4 py-3"
             >
-              <span class="text-xs font-semibold uppercase tracking-wide text-muted">Username</span>
+              <span class="text-xs font-semibold uppercase tracking-wide text-muted">Email</span>
               <span class="text-xs font-semibold uppercase tracking-wide text-muted">Name</span>
               <span class="text-xs font-semibold uppercase tracking-wide text-muted">Role</span>
               <span class="text-xs font-semibold uppercase tracking-wide text-muted">Status</span>
@@ -368,9 +397,9 @@ function notifyError(description: string) {
               <div
                 v-for="n in skeletonRows"
                 :key="`sk-${n}`"
-                class="grid grid-cols-[1.2fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line px-4 py-3 last:border-b-0"
+                class="grid grid-cols-[1.4fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line px-4 py-3 last:border-b-0"
               >
-                <USkeleton class="h-4 w-24" />
+                <USkeleton class="h-4 w-32" />
                 <USkeleton class="h-4 w-32" />
                 <USkeleton class="h-4 w-16" />
                 <USkeleton class="h-5 w-16 rounded-full" />
@@ -382,32 +411,35 @@ function notifyError(description: string) {
             <template v-else>
               <div
                 v-for="user in rows"
-                :key="user.id"
-                class="grid min-h-[52px] grid-cols-[1.2fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line px-4 py-2.5 transition-colors last:border-b-0 hover:bg-surface/60"
+                :key="user.userId"
+                class="grid min-h-[52px] grid-cols-[1.4fr_1.4fr_1fr_0.8fr_auto] items-center gap-4 border-b border-line px-4 py-2.5 transition-colors last:border-b-0 hover:bg-surface/60"
               >
-                <span class="truncate text-sm font-medium text-ink">{{ user.username }}</span>
+                <span class="truncate text-sm font-medium text-ink">{{ user.email }}</span>
                 <span class="truncate text-sm text-ink">{{ user.displayName }}</span>
-                <span class="truncate text-sm text-ink">{{ rolesLabel(user.roles) }}</span>
+                <span class="truncate text-sm text-ink">{{ roleLabel(user) }}</span>
                 <div>
-                  <StatusBadge :status="user.status" />
+                  <StatusBadge :status="statusOf(user)" />
                 </div>
                 <div class="flex items-center justify-end gap-1.5">
-                  <UButton
-                    size="xs"
-                    color="neutral"
-                    variant="outline"
-                    label="Edit Role"
-                    @click="openChangeRole(user)"
-                  />
-                  <UDropdownMenu :items="rowMenuItems(user)">
+                  <template v-if="canManage">
                     <UButton
                       size="xs"
                       color="neutral"
-                      variant="ghost"
-                      icon="i-lucide-ellipsis-vertical"
-                      aria-label="More actions"
+                      variant="outline"
+                      label="Edit Role"
+                      @click="openChangeRole(user)"
                     />
-                  </UDropdownMenu>
+                    <UDropdownMenu :items="rowMenuItems(user)">
+                      <UButton
+                        size="xs"
+                        color="neutral"
+                        variant="ghost"
+                        icon="i-lucide-ellipsis-vertical"
+                        aria-label="More actions"
+                      />
+                    </UDropdownMenu>
+                  </template>
+                  <span v-else class="text-xs text-muted">—</span>
                 </div>
               </div>
             </template>
@@ -427,14 +459,15 @@ function notifyError(description: string) {
     <UModal v-model:open="addOpen" title="Add User">
       <template #body>
         <form class="flex flex-col gap-4" @submit.prevent="submitAdd">
-          <FormField label="Username" name="add-username" :error="addErrors.username" required>
+          <FormField label="Email" name="add-email" :error="addErrors.email" required>
             <template #default="{ id, describedBy, invalid }">
               <UInput
                 :id="id"
-                v-model="addForm.username"
+                v-model="addForm.email"
+                type="email"
                 :aria-describedby="describedBy"
                 :aria-invalid="invalid"
-                placeholder="jdoe"
+                placeholder="jane@netops.local"
                 class="w-full"
               />
             </template>
@@ -466,13 +499,14 @@ function notifyError(description: string) {
             </template>
           </FormField>
 
-          <FormField label="Role" name="add-role" required>
+          <FormField label="Role" name="add-role" :error="addErrors.roleCode" required>
             <template #default="{ id }">
               <USelect
                 :id="id"
                 v-model="addForm.roleCode"
-                :items="ROLE_OPTIONS"
+                :items="roleOptions"
                 value-key="value"
+                placeholder="Select a role"
                 class="w-full"
               />
             </template>
@@ -531,7 +565,7 @@ function notifyError(description: string) {
               {{ roleTargetInitial }}
             </div>
             <div class="min-w-0 flex-1">
-              <p class="truncate text-sm font-semibold text-ink">{{ roleTarget.username }}</p>
+              <p class="truncate text-sm font-semibold text-ink">{{ roleTarget.email }}</p>
               <p class="truncate text-[13px] text-muted">{{ roleTarget.displayName }}</p>
             </div>
             <UBadge :label="roleTargetCurrentRole" color="primary" variant="soft" />
@@ -542,7 +576,7 @@ function notifyError(description: string) {
               <USelect
                 :id="id"
                 v-model="roleForm.roleCode"
-                :items="ROLE_OPTIONS"
+                :items="roleOptions"
                 value-key="value"
                 class="w-full"
               />

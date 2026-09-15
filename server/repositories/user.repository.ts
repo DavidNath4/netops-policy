@@ -1,7 +1,8 @@
-import { eq, sql } from 'drizzle-orm'
+import { count, desc, eq, ilike, or, sql } from 'drizzle-orm'
 
 import type { Database } from '~~/database'
 import { users } from '~~/database/schema/users'
+import { roles } from '~~/database/schema/roles'
 
 /**
  * Data-access layer for the `users` table.
@@ -63,4 +64,145 @@ export async function existsByEmail(db: Database, email: string): Promise<boolea
     .limit(1)
 
   return row !== undefined
+}
+
+// ---------------------------------------------------------------------------
+// Administration (user management)
+// ---------------------------------------------------------------------------
+
+/** A user row joined with its (optional) role, for the admin list/detail. */
+export interface UserWithRole {
+  userId: string
+  email: string
+  displayName: string
+  roleCode: string | null
+  roleName: string | null
+  isActive: boolean
+  lastLoginAt: Date | null
+  createdAt: Date
+  updatedAt: Date
+}
+
+/** Columns to insert a LOCAL user together with a role. */
+export interface InsertLocalUserWithRole extends InsertLocalUser {
+  roleId: string
+}
+
+/** Paginated user list with the role joined and an optional email/name search. */
+export async function listWithRole(
+  db: Database,
+  opts: { page: number, limit: number, search?: string },
+): Promise<{ items: UserWithRole[], total: number }> {
+  const search = opts.search?.trim()
+  const where = search
+    ? or(ilike(users.email, `%${search}%`), ilike(users.displayName, `%${search}%`))
+    : undefined
+
+  const [{ value: total } = { value: 0 }] = await db
+    .select({ value: count() })
+    .from(users)
+    .where(where)
+
+  const rows = await db
+    .select({
+      userId: users.userId,
+      email: users.email,
+      displayName: users.displayName,
+      roleCode: roles.roleCode,
+      roleName: roles.roleName,
+      isActive: users.isActive,
+      lastLoginAt: users.lastLoginAt,
+      createdAt: users.createdAt,
+      updatedAt: users.updatedAt,
+    })
+    .from(users)
+    .leftJoin(roles, eq(roles.roleId, users.roleId))
+    .where(where)
+    .orderBy(desc(users.createdAt))
+    .limit(opts.limit)
+    .offset((opts.page - 1) * opts.limit)
+
+  return { items: rows, total }
+}
+
+/** One user joined with its role, or undefined. */
+export async function findWithRoleById(
+  db: Database,
+  userId: string,
+): Promise<UserWithRole | undefined> {
+  const [row] = await db
+    .select({
+      userId: users.userId,
+      email: users.email,
+      displayName: users.displayName,
+      roleCode: roles.roleCode,
+      roleName: roles.roleName,
+      isActive: users.isActive,
+      lastLoginAt: users.lastLoginAt,
+      createdAt: users.createdAt,
+      updatedAt: users.updatedAt,
+    })
+    .from(users)
+    .leftJoin(roles, eq(roles.roleId, users.roleId))
+    .where(eq(users.userId, userId))
+    .limit(1)
+
+  return row
+}
+
+export async function createLocalUserWithRole(
+  db: Database,
+  input: InsertLocalUserWithRole,
+): Promise<UserRow> {
+  const [row] = await db
+    .insert(users)
+    .values({
+      email: input.email,
+      displayName: input.displayName,
+      passwordHash: input.passwordHash,
+      authProvider: 'LOCAL',
+      roleId: input.roleId,
+    })
+    .returning()
+
+  if (!row) {
+    throw new Error('Failed to create user: no row returned from insert')
+  }
+  return row
+}
+
+export async function updateDisplayName(
+  db: Database,
+  userId: string,
+  displayName: string,
+): Promise<void> {
+  await db
+    .update(users)
+    .set({ displayName, updatedAt: new Date() })
+    .where(eq(users.userId, userId))
+}
+
+export async function setRoleId(db: Database, userId: string, roleId: string): Promise<void> {
+  await db
+    .update(users)
+    .set({ roleId, updatedAt: new Date() })
+    .where(eq(users.userId, userId))
+}
+
+export async function setActive(db: Database, userId: string, isActive: boolean): Promise<void> {
+  await db
+    .update(users)
+    .set({ isActive, updatedAt: new Date() })
+    .where(eq(users.userId, userId))
+}
+
+export async function setPasswordHash(
+  db: Database,
+  userId: string,
+  passwordHash: string,
+): Promise<void> {
+  await db
+    .update(users)
+    .set({ passwordHash, updatedAt: new Date() })
+    .where(eq(users.userId, userId))
 }

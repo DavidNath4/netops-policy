@@ -17,8 +17,9 @@ interface NavLink {
   to: string
   icon: string
   children?: NavLink[]
-  // TODO: add an optional `permission` here and filter links via
-  // usePermissions().can(permission) so menus are gated by role (Req 2.7).
+  // Permission code required to see this link. Omit = always visible
+  // (Dashboard, Log Trail). Children carry their own permission (e.g. Add).
+  permission?: string
 }
 
 const props = withDefaults(defineProps<{ forceExpanded?: boolean }>(), {
@@ -37,27 +38,45 @@ const isRail = computed(() => collapsed.value && !props.forceExpanded)
 // full and closes via the backdrop).
 const showCollapseToggle = computed(() => !props.forceExpanded)
 
-const links: NavLink[] = [
+const { can } = usePermissions()
+
+// Full menu definition with the permission each item requires. Dashboard and
+// Log Trail have no permission — they are open to every authenticated user.
+const allLinks: NavLink[] = [
   { label: 'Dashboard', to: '/', icon: 'i-lucide-layout-dashboard' },
   {
     label: 'ACL Policies',
     to: '/acl',
     icon: 'i-lucide-shield',
+    permission: 'ACL_POLICIES_SHOW',
     children: [
-      { label: 'Add ACL', to: '/acl/add', icon: 'i-lucide-shield-plus' },
+      { label: 'Add ACL', to: '/acl/add', icon: 'i-lucide-shield-plus', permission: 'ACL_POLICIES_ADD' },
     ],
   },
   {
     label: 'Routes',
     to: '/routes',
     icon: 'i-lucide-route',
+    permission: 'ROUTES_SHOW',
     children: [
-      { label: 'Add Route', to: '/routes/add', icon: 'i-lucide-plus' },
+      { label: 'Add Route', to: '/routes/add', icon: 'i-lucide-plus', permission: 'ROUTES_ADD' },
     ],
   },
-  { label: 'Administration', to: '/administration', icon: 'i-lucide-users' },
+  { label: 'Administration', to: '/administration', icon: 'i-lucide-users', permission: 'ADMINISTRATION_SHOW' },
   { label: 'Log Trail', to: '/logs', icon: 'i-lucide-scroll-text' },
 ]
+
+// Gate by permission: a link with no `permission` is always shown; otherwise the
+// user must hold it. Children are filtered the same way, and a parent with all
+// children filtered out simply shows without the expandable sub-items.
+const links = computed<NavLink[]>(() =>
+  allLinks
+    .filter(l => !l.permission || can(l.permission))
+    .map(l => ({
+      ...l,
+      children: l.children?.filter(c => !c.permission || can(c.permission)),
+    })),
+)
 
 const route = useRoute()
 
@@ -65,7 +84,7 @@ const route = useRoute()
 // matching prefix). Keeps exactly one item highlighted, e.g. /acl/add lights
 // "Add ACL", while /acl/123 lights "ACL Policies".
 const allRoutes = computed(() =>
-  links.flatMap(l => [l.to, ...(l.children?.map(c => c.to) ?? [])]),
+  links.value.flatMap(l => [l.to, ...(l.children?.map(c => c.to) ?? [])]),
 )
 
 const activeTo = computed(() => {
@@ -94,7 +113,7 @@ function isBranchActive(link: NavLink): boolean {
 const expanded = ref<Set<string>>(new Set())
 
 function syncExpanded() {
-  for (const link of links) {
+  for (const link of links.value) {
     if (link.children?.length && isBranchActive(link)) {
       expanded.value.add(link.to)
     }

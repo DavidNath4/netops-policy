@@ -15,65 +15,12 @@ import type {
   AuditResponse,
   DashboardSummary,
   RouteResponse,
-  UserResponse,
 } from './api-types'
 
 // Deterministic pretend actor ids so createdBy/updatedBy look like real UUIDs.
 const ADMIN_ID = '00000000-0000-4000-8000-000000000001'
 const L2_ID = '00000000-0000-4000-8000-000000000002'
 const NOC_ID = '00000000-0000-4000-8000-000000000003'
-
-// ---------------------------------------------------------------------------
-// Users (~5, mix of roles and statuses)
-// ---------------------------------------------------------------------------
-
-export const mockUsers: UserResponse[] = [
-  {
-    id: ADMIN_ID,
-    username: 'admin',
-    displayName: 'System Administrator',
-    status: 'ACTIVE',
-    roles: ['ADMIN'],
-    createdAt: '2024-01-05T08:00:00.000Z',
-    updatedAt: '2024-05-20T09:30:00.000Z',
-  },
-  {
-    id: L2_ID,
-    username: 'a.wibowo',
-    displayName: 'Andi Wibowo',
-    status: 'ACTIVE',
-    roles: ['L2'],
-    createdAt: '2024-02-12T10:15:00.000Z',
-    updatedAt: '2024-06-01T14:45:00.000Z',
-  },
-  {
-    id: NOC_ID,
-    username: 's.putri',
-    displayName: 'Sari Putri',
-    status: 'ACTIVE',
-    roles: ['NOC'],
-    createdAt: '2024-03-01T07:20:00.000Z',
-    updatedAt: '2024-06-10T11:05:00.000Z',
-  },
-  {
-    id: '00000000-0000-4000-8000-000000000004',
-    username: 'b.santoso',
-    displayName: 'Budi Santoso',
-    status: 'DISABLED',
-    roles: ['L2'],
-    createdAt: '2024-03-18T13:40:00.000Z',
-    updatedAt: '2024-06-15T16:20:00.000Z',
-  },
-  {
-    id: '00000000-0000-4000-8000-000000000005',
-    username: 'd.lestari',
-    displayName: 'Dewi Lestari',
-    status: 'ACTIVE',
-    roles: ['NOC'],
-    createdAt: '2024-04-22T09:10:00.000Z',
-    updatedAt: '2024-06-18T08:55:00.000Z',
-  },
-]
 
 // ---------------------------------------------------------------------------
 // ACL policies (~8, varied protocols: TCP+port, UDP+port, ICMP no port, ANY)

@@ -4,6 +4,7 @@ import { getRequestHeader, getRequestHost } from 'h3'
 import type { UserRow } from '../repositories/user.repository'
 import { toUserResponse } from '../services/auth.service'
 import { validateSession } from '../services/session.service'
+import { getEffectivePermissions, hasPermission } from '../services/permission.service'
 import { useDatabase } from './db'
 import { apiError } from './envelope'
 import type { UserResponse } from '#shared/schemas/user.schema'
@@ -25,6 +26,25 @@ export async function requireAuthenticatedUser(event: H3Event): Promise<UserRow>
   const user = await getAuthenticatedUser(event)
   if (!user) {
     throw apiError(401, 'UNAUTHENTICATED', 'Authentication required')
+  }
+  return user
+}
+
+/**
+ * Authorize a request by data-driven permission (RBAC).
+ *
+ * Rejects with 401 when unauthenticated and 403 when the authenticated user's
+ * resolved permissions do not include `code`. Never branches on a role
+ * identifier — the decision is purely permission-based. Returns the user row so
+ * handlers can proceed without re-fetching.
+ *
+ * Example: `const user = await requirePermission(event, PERMISSIONS.ACL_POLICIES_ADD)`
+ */
+export async function requirePermission(event: H3Event, code: string): Promise<UserRow> {
+  const user = await requireAuthenticatedUser(event)
+  const permissionSet = await getEffectivePermissions(useDatabase(), user.userId)
+  if (!hasPermission(permissionSet, code)) {
+    throw apiError(403, 'FORBIDDEN', 'You do not have permission to perform this action')
   }
   return user
 }

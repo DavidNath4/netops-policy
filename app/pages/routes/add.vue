@@ -5,6 +5,8 @@
 // _Requirements: 6.1, 6.2, 6.3, 6.8, 13.1, 13.2, 13.3, 13.4_
 import type { CreateRouteInput, PolicyStatus } from '~/utils/api-types'
 
+definePageMeta({ middleware: 'permission', permission: 'ROUTES_ADD' })
+
 const api = useApi()
 
 interface RouteForm {

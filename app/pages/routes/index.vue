@@ -5,7 +5,11 @@
 // _Requirements: 6.1, 6.2, 13.1, 13.2, 13.3, 13.4_
 import type { Paginated, RouteResponse } from '~/utils/api-types'
 
+definePageMeta({ middleware: 'permission', permission: 'ROUTES_SHOW' })
+
 const api = useApi()
+const { can } = usePermissions()
+const canAdd = computed(() => can('ROUTES_ADD'))
 
 const ITEMS_PER_PAGE = 20
 
@@ -72,6 +76,7 @@ onMounted(load)
     <PageHeader title="Routes" description="Manage static routes and their next hops.">
       <template #actions>
         <NuxtLink
+          v-if="canAdd"
           to="/routes/add"
           class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90"
         >
@@ -128,7 +133,7 @@ onMounted(load)
       title="No routes found"
       :description="search ? 'Try adjusting your search.' : 'Get started by adding your first route.'"
     >
-      <template #action>
+      <template v-if="canAdd" #action>
         <NuxtLink
           to="/routes/add"
           class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90"

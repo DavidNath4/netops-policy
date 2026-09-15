@@ -170,7 +170,7 @@ netops-policy-manager/
 │   ├── auth/
 │   │   ├── password.ts              # argon2 hash/verify
 │   │   ├── session.ts               # token gen, hash, cookie helpers
-│   │   └── permissions.ts           # PERMISSIONS, ROLE_PERMISSIONS, hasPermission, requirePermission
+│   │   └── permissions.ts           # permission codes + hasPermission/requirePermission (resolves from DB)
 │   ├── services/
 │   │   ├── auth.service.ts
 │   │   ├── user.service.ts
@@ -214,9 +214,10 @@ netops-policy-manager/
 │   └── constants/                   # roles, permissions labels, enums
 ├── database/
 │   ├── schema/
-│   │   ├── users.ts
+│   │   ├── users.ts                 # includes nullable role_id FK → roles
 │   │   ├── roles.ts
-│   │   ├── user-roles.ts
+│   │   ├── permissions.ts
+│   │   ├── roles-permissions.ts
 │   │   ├── sessions.ts
 │   │   ├── acl-policies.ts
 │   │   ├── routes.ts
@@ -264,7 +265,9 @@ export const auditResultEnum= pgEnum('audit_result',['SUCCESS', 'FAILURE']);
 
 ### Drizzle Schema
 
-Requirement mapping: UUID primary keys (Req 10.2), unique username (Req 10.3), FKs (Req 10.4), no duplicate role assignments (Req 10.5), indexes (Req 10.6).
+Requirement mapping: UUID primary keys (Req 10.2), unique username (Req 10.3), FKs (Req 10.4), no duplicate permission assignments per role (Req 10.5), indexes (Req 10.6).
+
+> The RBAC tables below (`roles`, `permissions`, `roles_permissions`, and the `users.role_id` column) are specified in full — with initial data, initial mapping, and constraints — in the dedicated **RBAC & Permissions** spec (`.kiro/specs/rbac-permissions/design.md`). They are summarized here so the identity schema reads as a whole.
 
 ```typescript
 // database/schema/users.ts
@@ -285,29 +288,51 @@ export const users = pgTable('users', {
 ```
 
 ```typescript
-// database/schema/roles.ts
+// database/schema/roles.ts — master role table (data-driven RBAC)
 export const roles = pgTable('roles', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  code: varchar('code', { length: 16 }).notNull().unique(),                // ADMIN | L2 | NOC
-  name: varchar('name', { length: 64 }).notNull(),
-  description: varchar('description', { length: 255 }),
+  roleId: uuid('role_id').primaryKey().defaultRandom(),
+  roleCode: varchar('role_code', { length: 50 }).notNull().unique(),  // ADMINISTRATOR | L2_ENGINEER | NOC | future
+  roleName: varchar('role_name', { length: 100 }).notNull(),
+  description: text('description'),
+  isActive: boolean('is_active').notNull().default(true),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 });
 ```
 
 ```typescript
-// database/schema/user-roles.ts
-import { pgTable, uuid, primaryKey } from 'drizzle-orm/pg-core';
-import { users } from './users';
-import { roles } from './roles';
-
-export const userRoles = pgTable('user_roles', {
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }), // Req 10.4
-  roleId: uuid('role_id').notNull().references(() => roles.id, { onDelete: 'restrict' }),
+// database/schema/permissions.ts — feature + action capabilities
+export const permissions = pgTable('permissions', {
+  permissionId: uuid('permission_id').primaryKey().defaultRandom(),
+  permissionCode: varchar('permission_code', { length: 100 }).notNull().unique(), // e.g. ACL_POLICIES_ADD
+  feature: varchar('feature', { length: 50 }).notNull(),   // ACL_POLICIES | ROUTES | ADMINISTRATION
+  action: varchar('action', { length: 30 }).notNull(),     // SHOW | ADD | DELETE | MANAGE
+  description: text('description'),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
-  pk: primaryKey({ columns: [t.userId, t.roleId] }),   // composite PK prevents duplicate assignment (Req 10.5)
+  featureActionUq: uniqueIndex('permissions_feature_action_uidx').on(t.feature, t.action), // Req 10 / RBAC
 }));
+```
+
+```typescript
+// database/schema/roles-permissions.ts — role→permission mapping (many-to-many)
+export const rolesPermissions = pgTable('roles_permissions', {
+  rolePermissionId: uuid('role_permission_id').primaryKey().defaultRandom(),
+  roleId: uuid('role_id').notNull().references(() => roles.roleId, { onDelete: 'cascade' }),
+  permissionId: uuid('permission_id').notNull().references(() => permissions.permissionId, { onDelete: 'cascade' }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => ({
+  rolePermUq: uniqueIndex('roles_permissions_role_perm_uidx').on(t.roleId, t.permissionId), // Req 10.5
+}));
+```
+
+The `users` table gains a nullable `role_id` FK (one role per user for now). The FK uses **`ON DELETE RESTRICT`** so a role that is still assigned to any user cannot be deleted — retiring a role is done by setting `roles.is_active = false`, not by deletion. A user with `role_id = null` holds no feature permissions.
+
+```typescript
+// database/schema/users.ts — role_id addition (see RBAC spec for the migration)
+//   roleId: uuid('role_id').references(() => roles.roleId, { onDelete: 'restrict' }),  // nullable
 ```
 
 ```typescript
@@ -598,38 +623,40 @@ Cookie flags: `HttpOnly`, `SameSite=Lax`, `Path=/`; `Secure` added only when `NO
 
 ### RBAC (`server/auth/permissions.ts`) — Req 2
 
+Authorization is **data-driven**: roles, permissions, and their mapping live in the database (`roles`, `permissions`, `roles_permissions`), and a user is linked to at most one role via `users.role_id`. Nothing is hardcoded against a role identifier — a new role is provisioned purely as data (a `roles` row plus `roles_permissions` mappings) without any code change. The full schema, initial data, initial mapping, seeding, and enforcement rules are specified in the dedicated **RBAC & Permissions** spec (`.kiro/specs/rbac-permissions/`); this section shows how the rest of the app consumes it.
+
+Permissions are `feature` + `action` pairs, referenced in code by their `permission_code` (`<FEATURE>_<ACTION>`), e.g. `ACL_POLICIES_ADD`, `ROUTES_DELETE`, `ADMINISTRATION_MANAGE`. Features and actions in this phase:
+
+- `ACL_POLICIES`: `SHOW`, `ADD`, `DELETE`
+- `ROUTES`: `SHOW`, `ADD`, `DELETE`
+- `ADMINISTRATION`: `SHOW`, `MANAGE`
+
+Dashboard and Log Trail are **not** permission-gated — they are available to every authenticated user (Req 2.10, 8.10).
+
 ```typescript
-export const PERMISSIONS = {
-  USER_READ:'USER_READ', USER_MANAGE:'USER_MANAGE',
-  ACL_READ:'ACL_READ', ACL_CREATE:'ACL_CREATE', ACL_UPDATE:'ACL_UPDATE', ACL_DELETE:'ACL_DELETE',
-  ROUTE_READ:'ROUTE_READ', ROUTE_CREATE:'ROUTE_CREATE', ROUTE_UPDATE:'ROUTE_UPDATE', ROUTE_DELETE:'ROUTE_DELETE',
-  AUDIT_READ:'AUDIT_READ', AUDIT_EXPORT:'AUDIT_EXPORT',
-} as const;                                                    // Req 2.2
-export type Permission = typeof PERMISSIONS[keyof typeof PERMISSIONS];
-export type Role = 'ADMIN' | 'L2' | 'NOC';                     // Req 2.1
+// Permission codes are strings resolved from the DB, not a hardcoded union of
+// role identifiers. A tiny helper builds a code from a feature + action.
+export type PermissionCode = string;                          // e.g. 'ACL_POLICIES_ADD'
+export const permissionCode = (feature: string, action: string) => `${feature}_${action}`;
 
-// Single centralized mapping (Req 2.3)
-export const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
-  ADMIN: Object.values(PERMISSIONS),
-  L2:    [PERMISSIONS.ACL_READ, PERMISSIONS.ACL_CREATE, PERMISSIONS.ACL_UPDATE, PERMISSIONS.ACL_DELETE,
-          PERMISSIONS.ROUTE_READ, PERMISSIONS.ROUTE_CREATE, PERMISSIONS.ROUTE_UPDATE, PERMISSIONS.ROUTE_DELETE,
-          PERMISSIONS.AUDIT_READ],
-  NOC:   [PERMISSIONS.ACL_READ, PERMISSIONS.ROUTE_READ, PERMISSIONS.AUDIT_READ],
-};
+// The session/auth context carries the user's RESOLVED permission codes,
+// computed once per request by joining users → roles → roles_permissions →
+// permissions (only active roles/permissions count). See the RBAC spec.
+interface AuthContext { user: AuthUser; permissions: Set<PermissionCode> }
 
-export function hasPermission(user: AuthUser, perm: Permission): boolean {  // Req 2.4
-  return user.roles.some((r) => ROLE_PERMISSIONS[r]?.includes(perm));
+export function hasPermission(auth: AuthContext, code: PermissionCode): boolean { // Req 2.4
+  return auth.permissions.has(code);
 }
 
-export function requirePermission(event, perm: Permission): AuthUser {      // Req 2.4
-  const auth = event.context.auth;
-  if (!auth?.user) throw new AppError('UNAUTHENTICATED', 401);              // Req 2.5
-  if (!hasPermission(auth.user, perm)) throw new AppError('FORBIDDEN', 403); // Req 2.6
+export function requirePermission(event, code: PermissionCode): AuthUser {        // Req 2.4
+  const auth = event.context.auth as AuthContext | undefined;
+  if (!auth?.user) throw new AppError('UNAUTHENTICATED', 401);                    // Req 2.5
+  if (!hasPermission(auth, code)) throw new AppError('FORBIDDEN', 403);           // Req 2.6
   return auth.user;
 }
 ```
 
-Every protected handler calls `requirePermission` first; the server enforces this independently of the frontend (Req 2.8).
+Every protected handler calls `requirePermission` first (e.g. `requirePermission(event, 'ACL_POLICIES_ADD')`); the server enforces this independently of the frontend (Req 2.8, 2.9). A user with `role_id = null` resolves to an empty permission set and is denied every feature action (but still reaches Dashboard and Log Trail).
 
 ### Services (`server/services/`)
 
@@ -663,27 +690,27 @@ A default generic/Cisco-like implementation (`DefaultAclCommandGenerator`, `Defa
 | POST | `/api/auth/logout` | valid session | — | `{}` |
 | GET | `/api/auth/me` | valid session | — | `{user, permissions}` (Req 1.9) |
 | GET | `/api/health` | none | — | `{status:"healthy"}` (Req 16.4) |
-| GET | `/api/users` | USER_READ | `PaginationQuerySchema` | `Paginated<UserResponse>` (Req 3.1) |
-| POST | `/api/users` | USER_MANAGE | `CreateUserSchema` | `UserResponse` (Req 3.2) |
-| GET | `/api/users/:id` | USER_READ | — | `UserResponse` |
-| PATCH | `/api/users/:id` | USER_MANAGE | `UpdateUserSchema` | `UserResponse` (Req 3.3) |
-| PATCH | `/api/users/:id/role` | USER_MANAGE | `ChangeUserRoleSchema` | `UserResponse` (Req 3.4) |
-| PATCH | `/api/users/:id/status` | USER_MANAGE | `{status}` | `UserResponse` (Req 3.5) |
-| POST | `/api/users/:id/reset-password` | USER_MANAGE | `ResetPasswordSchema` | `{}` (Req 3.6) |
-| GET | `/api/acl` | ACL_READ | `PaginationQuerySchema` + filters | `Paginated<AclResponse>` (Req 4.1) |
-| POST | `/api/acl` | ACL_CREATE | `CreateAclSchema` | `AclResponse` (Req 4.3) |
-| GET | `/api/acl/:id` | ACL_READ | — | `AclResponse` (Req 4.2) |
-| PATCH | `/api/acl/:id` | ACL_UPDATE | `UpdateAclSchema` | `AclResponse` (Req 4.9) |
-| DELETE | `/api/acl/:id` | ACL_DELETE | — | `{}` (Req 4.10) |
-| GET | `/api/routes` | ROUTE_READ | `PaginationQuerySchema` + filters | `Paginated<RouteResponse>` (Req 6.1) |
-| POST | `/api/routes` | ROUTE_CREATE | `CreateRouteSchema` | `RouteResponse` (Req 6.3) |
-| GET | `/api/routes/:id` | ROUTE_READ | — | `RouteResponse` (Req 6.2) |
-| PATCH | `/api/routes/:id` | ROUTE_UPDATE | `UpdateRouteSchema` | `RouteResponse` (Req 6.6) |
-| DELETE | `/api/routes/:id` | ROUTE_DELETE | — | `{}` (Req 6.7) |
-| GET | `/api/audit` | AUDIT_READ | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.7) |
-| GET | `/api/audit/:id` | AUDIT_READ | — | `AuditResponse` (Req 8.8) |
-| GET | `/api/audit/export` | AUDIT_EXPORT | `AuditQuerySchema` | export payload (Req 8.9) |
+| GET | `/api/users` | ADMINISTRATION_SHOW | `PaginationQuerySchema` | `Paginated<UserResponse>` (Req 3.1) |
+| POST | `/api/users` | ADMINISTRATION_MANAGE | `CreateUserSchema` | `UserResponse` (Req 3.2) |
+| GET | `/api/users/:id` | ADMINISTRATION_SHOW | — | `UserResponse` |
+| PATCH | `/api/users/:id` | ADMINISTRATION_MANAGE | `UpdateUserSchema` | `UserResponse` (Req 3.3) |
+| PATCH | `/api/users/:id/role` | ADMINISTRATION_MANAGE | `ChangeUserRoleSchema` | `UserResponse` (Req 3.4) |
+| PATCH | `/api/users/:id/status` | ADMINISTRATION_MANAGE | `{status}` | `UserResponse` (Req 3.5) |
+| POST | `/api/users/:id/reset-password` | ADMINISTRATION_MANAGE | `ResetPasswordSchema` | `{}` (Req 3.6) |
+| GET | `/api/acl` | ACL_POLICIES_SHOW | `PaginationQuerySchema` + filters | `Paginated<AclResponse>` (Req 4.1) |
+| POST | `/api/acl` | ACL_POLICIES_ADD | `CreateAclSchema` | `AclResponse` (Req 4.3) |
+| GET | `/api/acl/:id` | ACL_POLICIES_SHOW | — | `AclResponse` (Req 4.2) |
+| DELETE | `/api/acl/:id` | ACL_POLICIES_DELETE | — | `{}` (Req 4.10) |
+| GET | `/api/routes` | ROUTES_SHOW | `PaginationQuerySchema` + filters | `Paginated<RouteResponse>` (Req 6.1) |
+| POST | `/api/routes` | ROUTES_ADD | `CreateRouteSchema` | `RouteResponse` (Req 6.3) |
+| GET | `/api/routes/:id` | ROUTES_SHOW | — | `RouteResponse` (Req 6.2) |
+| DELETE | `/api/routes/:id` | ROUTES_DELETE | — | `{}` (Req 6.7) |
+| GET | `/api/audit` | valid session | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.7) |
+| GET | `/api/audit/:id` | valid session | — | `AuditResponse` (Req 8.8) |
+| GET | `/api/audit/export` | valid session | `AuditQuerySchema` | export payload (Req 8.9) |
 | GET | `/api/dashboard/summary` | valid session | — | summary object (Req 9) |
+
+The ACL/Route update (`PATCH`) endpoints from the original design are intentionally omitted here: this RBAC phase defines only `SHOW`, `ADD`, and `DELETE` actions for `ACL_POLICIES` and `ROUTES`. If an edit action is added later, a corresponding `UPDATE` permission is introduced in the RBAC spec first.
 
 All list endpoints paginate server-side (Req 12.6, NFR Perf 1).
 
@@ -858,11 +885,11 @@ Internal errors never leak SQL, stack traces, filesystem paths, or secrets to th
 
 **Validates: Requirements 4.11, 6.8, 7.3**
 
-### Property 12: hasPermission agrees with the centralized map
+### Property 12: hasPermission agrees with the resolved permission set
 
-*For any* user with a set of roles and any permission, `hasPermission(user, permission)` returns true if and only if some role held by the user grants that permission in `ROLE_PERMISSIONS`.
+*For any* user and any permission code, `hasPermission(auth, code)` returns true if and only if `code` is present in the permission set resolved for the user's role from `roles_permissions` (only active roles and permissions counted). A user with `role_id = null` yields an empty set and grants nothing.
 
-**Validates: Requirements 2.3, 2.4**
+**Validates: Requirements 2.1, 2.4, 2.9**
 
 ### Property 13: Zod errors map to fields
 
@@ -890,7 +917,7 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 
 - **Network schemas** — Properties 1–8 (IPv4, CIDR, port, protocol, ACL cross-field, next hop, time, empty-string rejection).
 - **Command generators** — Property 11 (non-empty, deterministic preview).
-- **RBAC helpers** — Property 12 (`hasPermission` vs `ROLE_PERMISSIONS`).
+- **RBAC helpers** — Property 12 (`hasPermission` vs the DB-resolved permission set).
 - **Mappers** — Properties 9 and 10 (response mappers strip secrets; request schemas strip server fields).
 - **Error handler** — Properties 13 and 14 (Zod→fields, internal-error redaction).
 - **Pagination** — Property 15.

@@ -24,8 +24,8 @@ const notifOpen = ref(false)
 const profileOpen = ref(false)
 
 async function onLogout() {
+  // logout() clears auth state and navigates to /login itself.
   await logout()
-  await navigateTo('/login')
 }
 </script>
 

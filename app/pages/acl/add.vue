@@ -4,6 +4,8 @@
 // Requirements: 4.1, 4.2, 4.3, 4.11, 13.1, 13.2, 13.3, 13.4
 import type { AclAction, CreateAclInput, PolicyStatus, Protocol } from '~/utils/api-types'
 
+definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_ADD' })
+
 const api = useApi()
 
 const protocolOptions: { label: string; value: Protocol }[] = [

@@ -1,9 +1,19 @@
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import { z } from 'zod'
 
 import { createDatabase } from '../index'
 import { users } from '../schema/users'
+import { roles } from '../schema/roles'
+import { permissions } from '../schema/permissions'
+import { rolesPermissions } from '../schema/roles-permissions'
 import { hashPassword } from '../../server/services/password.service'
+import {
+  PERMISSION_DEFS,
+  ROLE_CODES,
+  ROLE_DEFS,
+  ROLE_PERMISSION_MAP,
+  permissionCode,
+} from '../../shared/constants/rbac'
 
 /**
  * Development seed: create the first LOCAL user.
@@ -53,12 +63,26 @@ async function main(): Promise<void> {
   const { db, client } = createDatabase(env.DATABASE_URL)
 
   try {
+    await seedRbac(db)
+
+    const adminRoleId = await roleIdByCode(db, ROLE_CODES.ADMINISTRATOR)
+
     const existing = await db.query.users.findFirst({
       where: eq(users.email, env.SEED_USER_EMAIL),
     })
 
     if (existing) {
-      console.log('Development user already exists.')
+      // Backfill the role on an already-seeded admin so re-running the seed
+      // (e.g. after adding RBAC) grants the ADMINISTRATOR role idempotently.
+      if (!existing.roleId && adminRoleId) {
+        await db.update(users)
+          .set({ roleId: adminRoleId, updatedAt: new Date() })
+          .where(eq(users.userId, existing.userId))
+        console.log('Assigned ADMINISTRATOR role to the existing development user.')
+      }
+      else {
+        console.log('Development user already exists.')
+      }
       return
     }
 
@@ -69,13 +93,78 @@ async function main(): Promise<void> {
       displayName: env.SEED_USER_DISPLAY_NAME,
       passwordHash,
       authProvider: 'LOCAL',
+      roleId: adminRoleId,
     })
 
-    console.log('Development user created successfully.')
+    console.log('Development user created successfully (role: ADMINISTRATOR).')
   }
   finally {
     await client.end()
   }
+}
+
+type Db = ReturnType<typeof createDatabase>['db']
+
+/** Look up a role's id by its code, or undefined if not seeded. */
+async function roleIdByCode(db: Db, code: string): Promise<string | undefined> {
+  const row = await db.query.roles.findFirst({ where: eq(roles.roleCode, code) })
+  return row?.roleId
+}
+
+/**
+ * Idempotently seed roles, permissions, and the role→permission mapping.
+ * Re-running is safe: existing rows (matched by their unique codes / pairs) are
+ * left in place, missing ones are inserted.
+ */
+async function seedRbac(db: Db): Promise<void> {
+  // Roles
+  for (const def of ROLE_DEFS) {
+    const found = await db.query.roles.findFirst({ where: eq(roles.roleCode, def.code) })
+    if (!found) {
+      await db.insert(roles).values({ roleCode: def.code, roleName: def.name, description: def.description })
+    }
+  }
+
+  // Permissions
+  for (const def of PERMISSION_DEFS) {
+    const code = permissionCode(def.feature, def.action)
+    const found = await db.query.permissions.findFirst({
+      where: eq(permissions.permissionCode, code),
+    })
+    if (!found) {
+      await db.insert(permissions).values({
+        permissionCode: code,
+        feature: def.feature,
+        action: def.action,
+      })
+    }
+  }
+
+  // Mapping
+  for (const [roleCode, codes] of Object.entries(ROLE_PERMISSION_MAP)) {
+    const role = await db.query.roles.findFirst({ where: eq(roles.roleCode, roleCode) })
+    if (!role) continue
+    for (const code of codes) {
+      const perm = await db.query.permissions.findFirst({
+        where: eq(permissions.permissionCode, code),
+      })
+      if (!perm) continue
+      const existing = await db.query.rolesPermissions.findFirst({
+        where: and(
+          eq(rolesPermissions.roleId, role.roleId),
+          eq(rolesPermissions.permissionId, perm.permissionId),
+        ),
+      })
+      if (!existing) {
+        await db.insert(rolesPermissions).values({
+          roleId: role.roleId,
+          permissionId: perm.permissionId,
+        })
+      }
+    }
+  }
+
+  console.log('RBAC roles, permissions, and mapping seeded.')
 }
 
 main().catch((err) => {

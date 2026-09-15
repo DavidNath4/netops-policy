@@ -14,7 +14,9 @@
 // ---------------------------------------------------------------------------
 
 export type UserStatus = 'ACTIVE' | 'DISABLED'
-export type RoleCode = 'ADMIN' | 'L2' | 'NOC'
+// Real data-driven role codes (from the `roles` table). New roles can be added
+// as data; this union lists the seeded ones for convenience only.
+export type RoleCode = 'ADMINISTRATOR' | 'L2_ENGINEER' | 'NOC'
 export type PolicyStatus = 'DRAFT' | 'ACTIVE' | 'DISABLED'
 export type Protocol = 'TCP' | 'UDP' | 'ICMP' | 'ANY'
 export type AclAction = 'ALLOW' | 'DENY'
@@ -24,15 +26,27 @@ export type AuditResult = 'SUCCESS' | 'FAILURE'
 // Resource response shapes (mirror design.md API Response schemas)
 // ---------------------------------------------------------------------------
 
-/** UserResponse — never exposes password, password hash, or session token. */
+/**
+ * UserResponse — Administration user shape (real backend). One role per user
+ * (roleCode/roleName null when unassigned); email is the identifier; isActive
+ * is the status. Never exposes password, password hash, or session token.
+ */
 export interface UserResponse {
-  id: string
-  username: string
+  userId: string
+  email: string
   displayName: string
-  status: UserStatus
-  roles: RoleCode[]
+  roleCode: string | null
+  roleName: string | null
+  isActive: boolean
+  lastLoginAt: string | null
   createdAt: string
   updatedAt: string
+}
+
+/** A selectable role for the Administration role dropdown. */
+export interface RoleOption {
+  roleCode: string
+  roleName: string
 }
 
 /** AclResponse — includes server-set generatedCommand and audit fields. */
@@ -158,10 +172,10 @@ export type CreateRouteInput = Omit<
 export type UpdateRouteInput = Partial<CreateRouteInput>
 
 export interface CreateUserInput {
-  username: string
+  email: string
   displayName: string
   password: string
-  roleCode: RoleCode
+  roleCode: string
 }
 export interface UpdateUserInput {
   displayName: string

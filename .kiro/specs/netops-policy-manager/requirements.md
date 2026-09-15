@@ -26,8 +26,8 @@ This document defines the functional requirements (grouped by capability area), 
 - **API_Layer**: The Nitro server routes exposing HTTP endpoints under `/api`.
 - **Frontend**: The Nuxt/Vue 3 client application.
 - **Config_Service**: The server-side component that validates environment configuration at startup.
-- **Permission**: A named capability such as `USER_READ`, `ACL_CREATE`, or `AUDIT_EXPORT`.
-- **Role**: A named grouping of permissions; one of `ADMIN`, `L2`, or `NOC`.
+- **Permission**: A named capability defined as a `feature` + `action` pair (e.g. `ACL_POLICIES` + `ADD`), persisted in the `permissions` table.
+- **Role**: A named grouping of Permissions, persisted in the `roles` table and mapped to Permissions via `roles_permissions`. A user is associated with at most one Role via `users.role_id`. Roles are data, not hardcoded identifiers.
 - **Session_Token**: A raw, high-entropy token issued to the client and stored client-side only in an HttpOnly cookie.
 - **Server_Controlled_Field**: A field whose value is set exclusively by the server: `id`, `generatedCommand`, `createdBy`, `createdAt`, `updatedBy`, `updatedAt`.
 - **API_Envelope**: The standard response shape `{success:true,data}` on success or `{success:false,error:{code,message,fields?}}` on failure.
@@ -55,18 +55,22 @@ This document defines the functional requirements (grouped by capability area), 
 
 ### Requirement 2: Authorization and Role-Based Access Control
 
-**User Story:** As a security administrator, I want every protected action gated by server-side permission checks tied to roles, so that access control cannot be bypassed by the client.
+**User Story:** As a security administrator, I want every protected action gated by server-side permission checks driven by data, so that access control cannot be bypassed by the client and new roles can be introduced without code changes.
+
+> Detailed acceptance criteria for the data-driven RBAC model (role/permission/mapping schema, initial data, and future-role support) live in the dedicated **RBAC & Permissions** spec (`.kiro/specs/rbac-permissions/`). This requirement states the system-level guarantees the rest of NetOps Policy Manager depends on.
 
 #### Acceptance Criteria
 
-1. THE Authorization_Service SHALL define the roles `ADMIN`, `L2`, and `NOC`.
-2. THE Authorization_Service SHALL define the permissions `USER_READ`, `USER_MANAGE`, `ACL_READ`, `ACL_CREATE`, `ACL_UPDATE`, `ACL_DELETE`, `ROUTE_READ`, `ROUTE_CREATE`, `ROUTE_UPDATE`, `ROUTE_DELETE`, `AUDIT_READ`, and `AUDIT_EXPORT`.
-3. THE Authorization_Service SHALL maintain a single centralized mapping from each Permission to the Roles that hold that Permission.
-4. THE Authorization_Service SHALL expose `hasPermission()` returning whether a given user holds a given Permission and `requirePermission()` enforcing a given Permission.
+1. THE Authorization_Service SHALL derive roles, permissions, and their mapping from persisted data (the `roles`, `permissions`, and `roles_permissions` tables) rather than from hardcoded role identifiers.
+2. THE Authorization_Service SHALL model each Permission as a `feature` + `action` pair, covering at minimum the features `ACL_POLICIES`, `ROUTES`, and `ADMINISTRATION` with the actions `SHOW`, `ADD`, and `DELETE` for `ACL_POLICIES` and `ROUTES`, and `SHOW` and `MANAGE` for `ADMINISTRATION`.
+3. THE Authorization_Service SHALL associate each user with at most one Role via `users.role_id`, and SHALL treat a user whose `role_id` is null as holding no feature Permissions.
+4. THE Authorization_Service SHALL resolve a user's effective Permissions by joining the user's Role to its mapped Permissions, and SHALL expose `hasPermission()` and `requirePermission()` that evaluate those resolved Permissions.
 5. IF a request to a protected endpoint has no valid session, THEN THE API_Layer SHALL reject the request with HTTP status 401.
 6. IF a request to a protected endpoint has a valid session but the user lacks the required Permission, THEN THE API_Layer SHALL reject the request with HTTP status 403.
-7. WHERE a Permission determines visibility of a menu or button, THE Frontend SHALL hide that menu or button from users lacking the Permission.
+7. WHERE a Permission determines visibility of a menu or button, THE Frontend SHALL hide or disable that menu or button for users lacking the Permission.
 8. THE API_Layer SHALL enforce every Permission check on the server independently of any Frontend behavior.
+9. THE Authorization_Service SHALL NOT hardcode authorization decisions against specific role identifiers (e.g. `role === 'NOC'`); all decisions SHALL be based on resolved Permissions.
+10. THE Dashboard and Log Trail SHALL be accessible to every authenticated user and SHALL NOT require any feature Permission.
 
 ### Requirement 3: User Administration
 
@@ -74,15 +78,16 @@ This document defines the functional requirements (grouped by capability area), 
 
 #### Acceptance Criteria
 
-1. WHEN a user holding `USER_READ` requests the user list, THE User_Admin_Service SHALL return a paginated list of users supporting a search filter.
-2. WHEN a user holding `USER_MANAGE` submits data validated by `CreateUserSchema`, THE User_Admin_Service SHALL create a new user account.
-3. WHEN a user holding `USER_MANAGE` submits data validated by `UpdateUserSchema`, THE User_Admin_Service SHALL update the target user's basic information.
-4. WHEN a user holding `USER_MANAGE` submits data validated by `ChangeUserRoleSchema`, THE User_Admin_Service SHALL change the target user's Role and SHALL record a USER_ROLE_CHANGED audit entry.
-5. WHEN a user holding `USER_MANAGE` activates or deactivates a target user, THE User_Admin_Service SHALL update the target user's active status and SHALL record a USER_STATUS_CHANGED audit entry.
-6. WHEN a user holding `USER_MANAGE` submits data validated by `ResetPasswordSchema`, THE User_Admin_Service SHALL store a new Argon2 password hash for the target user.
+1. WHEN a user holding `ADMINISTRATION_SHOW` requests the user list, THE User_Admin_Service SHALL return a paginated list of users supporting a search filter.
+2. WHEN a user holding `ADMINISTRATION_MANAGE` submits data validated by `CreateUserSchema`, THE User_Admin_Service SHALL create a new user account.
+3. WHEN a user holding `ADMINISTRATION_MANAGE` submits data validated by `UpdateUserSchema`, THE User_Admin_Service SHALL update the target user's basic information.
+4. WHEN a user holding `ADMINISTRATION_MANAGE` submits data validated by `ChangeUserRoleSchema`, THE User_Admin_Service SHALL change the target user's Role and SHALL record a USER_ROLE_CHANGED audit entry.
+5. WHEN a user holding `ADMINISTRATION_MANAGE` activates or deactivates a target user, THE User_Admin_Service SHALL update the target user's active status and SHALL record a USER_STATUS_CHANGED audit entry.
+6. WHEN a user holding `ADMINISTRATION_MANAGE` submits data validated by `ResetPasswordSchema`, THE User_Admin_Service SHALL store a new Argon2 password hash for the target user.
 7. WHEN the User_Admin_Service returns user data validated by `UserResponseSchema`, THE User_Admin_Service SHALL exclude the password, password hash, and any Session_Token.
 8. WHEN a user is created, THE Audit_Service SHALL record a USER_CREATED audit entry.
 9. WHEN a user's basic information is updated, THE Audit_Service SHALL record a USER_UPDATED audit entry.
+10. WHEN a user holding `ADMINISTRATION_MANAGE` changes a target user's Role, THE User_Admin_Service SHALL assign exactly one Role by setting `users.role_id`.
 
 ### Requirement 4: ACL Policy Management
 
@@ -167,9 +172,10 @@ This document defines the functional requirements (grouped by capability area), 
 4. WHEN a mutation that requires auditing succeeds, THE Audit_Service SHALL write the corresponding audit entry within the same database transaction as the mutation.
 5. IF the audit write within a mutation transaction fails, THEN THE Data_Layer SHALL roll back the mutation.
 6. THE API_Layer SHALL NOT expose any endpoint that deletes audit entries during normal operation.
-7. WHEN a user holding `AUDIT_READ` opens the `/logs` page, THE Frontend SHALL provide search, date filtering, activity filtering, result filtering, and pagination.
-8. WHEN a user holding `AUDIT_READ` selects an audit entry, THE Frontend SHALL display a detail view of that entry.
-9. WHEN a user holding `AUDIT_EXPORT` requests an export, THE Audit_Service SHALL produce an export of the selected audit entries.
+7. WHEN any authenticated user opens the `/logs` (Log Trail) page, THE Frontend SHALL provide search, date filtering, activity filtering, result filtering, and pagination.
+8. WHEN any authenticated user selects an audit entry, THE Frontend SHALL display a detail view of that entry.
+9. WHEN any authenticated user requests an export, THE Audit_Service SHALL produce an export of the selected audit entries.
+10. THE Log Trail SHALL be available to every authenticated user and SHALL NOT require a feature Permission.
 
 ### Requirement 9: Dashboard
 
@@ -190,11 +196,11 @@ This document defines the functional requirements (grouped by capability area), 
 
 #### Acceptance Criteria
 
-1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, user_roles, sessions, acl_policies, routes, and audit_logs.
+1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, permissions, roles_permissions, sessions, acl_policies, routes, and audit_logs.
 2. THE Data_Layer SHALL use UUID values as primary key identifiers.
 3. THE Data_Layer SHALL enforce a unique constraint on the users username column.
 4. THE Data_Layer SHALL define foreign key constraints between related tables.
-5. THE Data_Layer SHALL prevent duplicate Role assignments for the same user in the user_roles table.
+5. THE Data_Layer SHALL prevent duplicate Permission assignments for the same Role via a unique constraint on `roles_permissions(role_id, permission_id)`.
 6. THE Data_Layer SHALL define indexes on username, ACL name, ACL status, change_ticket, route destination, route status, audit timestamp, audit actor, and audit activity.
 7. THE Data_Layer SHALL execute all queries as parameterized Drizzle queries.
 
@@ -261,8 +267,8 @@ This document defines the functional requirements (grouped by capability area), 
 
 1. THE NetOps_Policy_Manager SHALL provide a `db:generate` command that produces Drizzle migrations.
 2. THE NetOps_Policy_Manager SHALL provide a `db:migrate` command that applies Drizzle migrations explicitly.
-3. THE NetOps_Policy_Manager SHALL provide a `db:seed` command that seeds the roles `ADMIN`, `L2`, and `NOC`.
-4. WHEN the `db:seed` command runs, THE NetOps_Policy_Manager SHALL create an initial admin account using credentials sourced from environment variables.
+3. THE NetOps_Policy_Manager SHALL provide a `db:seed` command that seeds the roles `ADMINISTRATOR`, `L2_ENGINEER`, and `NOC`, the initial permission catalog, and the initial role→permission mapping (as specified in the RBAC & Permissions spec).
+4. WHEN the `db:seed` command runs, THE NetOps_Policy_Manager SHALL create an initial admin account using credentials sourced from environment variables and SHALL assign it the `ADMINISTRATOR` role.
 5. THE NetOps_Policy_Manager SHALL NOT hardcode the initial admin credentials in source code.
 
 ### Requirement 16: Packaging and Deployment

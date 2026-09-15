@@ -1,15 +1,12 @@
-// MOCK STUB — replaced by real envelope-aware fetch in task 13.1. Callers must
-// not change when swapped.
+// HYBRID API layer.
 //
-// Every method returns the UNWRAPPED payload (the resource data itself, or a
-// Paginated<T> for list endpoints) — exactly what the real useApi() will return
-// after it unwraps the { success, data } API envelope. This keeps every caller
-// (pages built in tasks 2.4-2.8) stable across the swap: only the internals of
-// this file change in task 13.1, never the call sites.
+// - auth, users, roles → REAL envelope-aware $fetch against /api/*.
+// - acl, routes, audit, dashboard → still MOCK fixtures (those backends are a
+//   later phase; the call sites stay identical for when they're wired up).
 //
-// This stub reads from the static fixtures in ~/utils/mock-data and does simple
-// in-memory search/filter/paging so the pagination and search UI work now. No
-// $fetch, no backend, no database.
+// Every method returns the UNWRAPPED payload (the resource, or Paginated<T>) —
+// the real methods unwrap the { success, data } envelope; the mock ones read
+// fixtures. Callers never see the envelope.
 
 import type {
   AclResponse,
@@ -23,27 +20,44 @@ import type {
   ListParams,
   LoginCredentials,
   Paginated,
+  RoleOption,
   RouteResponse,
-  RoleCode,
   UpdateAclInput,
   UpdateRouteInput,
   UpdateUserInput,
   UserResponse,
-  UserStatus,
 } from '~/utils/api-types'
 import {
   mockAcls,
   mockAuditLogs,
   mockDashboardSummary,
   mockRoutes,
-  mockUsers,
 } from '~/utils/mock-data'
 
-// Small artificial latency so loading states are visible during the mock phase.
+// Small artificial latency so loading states are visible for the still-mock
+// resources (acl/routes/audit/dashboard).
 const MOCK_DELAY_MS = 150
 
 function resolve<T>(value: T): Promise<T> {
   return new Promise((res) => setTimeout(() => res(value), MOCK_DELAY_MS))
+}
+
+interface Envelope<T> { success: boolean, data: T }
+
+/** Unwrap the API envelope; SSR-safe (forwards cookies during server render). */
+async function apiGet<T>(url: string, query?: Record<string, unknown>): Promise<T> {
+  const requestFetch = useRequestFetch()
+  const res = await requestFetch<Envelope<T>>(url, { query })
+  return res.data
+}
+
+async function apiSend<T>(
+  url: string,
+  method: 'POST' | 'PATCH' | 'DELETE',
+  body?: Record<string, unknown> | object,
+): Promise<T> {
+  const res = await $fetch<Envelope<T>>(url, { method, body: body as Record<string, unknown> })
+  return res.data
 }
 
 /** Case-insensitive substring match across the given string fields. */
@@ -71,33 +85,17 @@ function filterByStatus<T extends { status: string }>(rows: T[], status?: string
 
 export function useApi() {
   return {
+    // REAL — the authoritative auth flow lives in useAuth(); this mirror is
+    // kept for any caller that reads identity/permissions via useApi.
     auth: {
       me(): Promise<AuthMe> {
-        const admin = mockUsers[0]!
-        return resolve({
-          user: admin,
-          permissions: [
-            'USER_READ',
-            'USER_MANAGE',
-            'ACL_READ',
-            'ACL_CREATE',
-            'ACL_UPDATE',
-            'ACL_DELETE',
-            'ROUTE_READ',
-            'ROUTE_CREATE',
-            'ROUTE_UPDATE',
-            'ROUTE_DELETE',
-            'AUDIT_READ',
-            'AUDIT_EXPORT',
-          ],
-        })
+        return apiGet<AuthMe>('/api/auth/me')
       },
-      login(_credentials: LoginCredentials): Promise<AuthMe> {
-        const admin = mockUsers[0]!
-        return resolve({ user: admin, permissions: ['ADMIN'] })
+      login(credentials: LoginCredentials): Promise<AuthMe> {
+        return apiSend<AuthMe>('/api/auth/login', 'POST', credentials)
       },
-      logout(): Promise<void> {
-        return resolve(undefined)
+      async logout(): Promise<void> {
+        await apiSend<unknown>('/api/auth/logout', 'POST')
       },
     },
 
@@ -151,31 +149,36 @@ export function useApi() {
       },
     },
 
+    // REAL — Administration user management (RBAC-guarded on the server).
     users: {
       list(params?: ListParams): Promise<Paginated<UserResponse>> {
-        let rows = filterByStatus(mockUsers, params?.status)
-        rows = rows.filter((u) =>
-          matchesSearch([u.username, u.displayName], params?.search),
-        )
-        return resolve(paginate(rows, params))
+        return apiGet<Paginated<UserResponse>>('/api/users', {
+          page: params?.page,
+          limit: params?.limit,
+          search: params?.search,
+        })
       },
-      get(id: string): Promise<UserResponse | undefined> {
-        return resolve(mockUsers.find((u) => u.id === id))
+      create(input: CreateUserInput): Promise<UserResponse> {
+        return apiSend<UserResponse>('/api/users', 'POST', input)
       },
-      create(_input: CreateUserInput): Promise<UserResponse> {
-        return resolve(mockUsers[0]!)
+      update(id: string, input: UpdateUserInput): Promise<UserResponse> {
+        return apiSend<UserResponse>(`/api/users/${id}`, 'PATCH', input)
       },
-      update(id: string, _input: UpdateUserInput): Promise<UserResponse> {
-        return resolve(mockUsers.find((u) => u.id === id) ?? mockUsers[0]!)
+      changeRole(id: string, roleCode: string): Promise<UserResponse> {
+        return apiSend<UserResponse>(`/api/users/${id}/role`, 'PATCH', { roleCode })
       },
-      changeRole(id: string, _roleCode: RoleCode): Promise<UserResponse> {
-        return resolve(mockUsers.find((u) => u.id === id) ?? mockUsers[0]!)
+      setStatus(id: string, isActive: boolean): Promise<UserResponse> {
+        return apiSend<UserResponse>(`/api/users/${id}/status`, 'PATCH', { isActive })
       },
-      setStatus(id: string, _status: UserStatus): Promise<UserResponse> {
-        return resolve(mockUsers.find((u) => u.id === id) ?? mockUsers[0]!)
+      async resetPassword(id: string, password: string): Promise<void> {
+        await apiSend<unknown>(`/api/users/${id}/reset-password`, 'POST', { password })
       },
-      resetPassword(_id: string, _password: string): Promise<void> {
-        return resolve(undefined)
+    },
+
+    // REAL — active roles for the Administration role dropdown.
+    roles: {
+      list(): Promise<{ roles: RoleOption[] }> {
+        return apiGet<{ roles: RoleOption[] }>('/api/roles')
       },
     },
 

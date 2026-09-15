@@ -8,6 +8,7 @@
 // value or the OS preference.
 export default defineNuxtPlugin(() => {
   const colorMode = useColorMode()
+  // `preference` is the writable setting; `value` is derived/read-only. Setting
+  // the preference to 'light' is enough to pin the mode on every client load.
   colorMode.preference = 'light'
-  colorMode.value = 'light'
 })

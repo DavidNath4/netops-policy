@@ -4,7 +4,11 @@
 // Requirements: 4.1, 4.2, 4.3, 4.11, 13.1, 13.2, 13.4
 import type { AclResponse, ListParams, PolicyStatus } from '~/utils/api-types'
 
+definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_SHOW' })
+
 const api = useApi()
+const { can } = usePermissions()
+const canAdd = computed(() => can('ACL_POLICIES_ADD'))
 
 // Status filter options (Active/Disabled/Draft/All).
 const statusOptions = [
@@ -102,6 +106,7 @@ onMounted(() => {
     >
       <template #actions>
         <NuxtLink
+          v-if="canAdd"
           to="/acl/add"
           class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90"
         >
@@ -161,7 +166,7 @@ onMounted(() => {
       description="Try adjusting your filters, or add a new policy."
       icon="i-lucide-shield-off"
     >
-      <template #action>
+      <template v-if="canAdd" #action>
         <NuxtLink
           to="/acl/add"
           class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90"

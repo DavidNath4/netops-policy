@@ -1,5 +1,7 @@
 import type { UserResponse } from '#shared/schemas/user.schema'
 import type { CreateLocalUserInput } from '#shared/schemas/user.schema'
+import type { MfaDeviceResponse } from '#shared/schemas/mfa.schema'
+import { MFA_DEVICE_LIMIT } from '#shared/schemas/mfa.schema'
 
 import type { Database } from '~~/database'
 import type { UserRow } from '../repositories/user.repository'
@@ -163,19 +165,151 @@ export async function verifyMfaEnrollment(
 }
 
 /**
- * Verify a TOTP code during login (second factor). Only enabled enrollments
- * count; a pending (unconfirmed) enrollment cannot satisfy login MFA.
+ * Verify a TOTP code during login (second factor). A user may have up to two
+ * enrolled devices; the code is valid if it matches ANY enabled device. Pending
+ * (unconfirmed) enrollments never count.
  */
 export async function verifyMfaLogin(
   db: Database,
   userId: string,
   code: string,
 ): Promise<boolean> {
-  const enrollment = await mfaRepo.findByUserId(db, userId)
-  if (!enrollment || !enrollment.isEnabled) {
+  const devices = await mfaRepo.listByUserId(db, userId)
+  const enabled = devices.filter(d => d.isEnabled)
+  if (enabled.length === 0) {
     return false
   }
 
-  const secret = decryptSecret(enrollment.secretEncrypted)
-  return verifyTotp(secret, code)
+  for (const device of enabled) {
+    const secret = decryptSecret(device.secretEncrypted)
+    if (await verifyTotp(secret, code)) {
+      return true
+    }
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
+// Multi-device MFA management (post-authentication, from the profile)
+// ---------------------------------------------------------------------------
+
+/** Business-rule violations for device management, mapped to API errors by callers. */
+export class MfaDeviceRuleError extends Error {
+  constructor(
+    public readonly rule: 'LIMIT_REACHED' | 'LAST_DEVICE' | 'NOT_FOUND',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'MfaDeviceRuleError'
+  }
+}
+
+/**
+ * List a user's CONFIRMED devices in the safe client shape (never exposes the
+ * secret). Pending/unconfirmed enrollments are excluded so a cancelled or
+ * abandoned "add device" attempt never shows up in the profile.
+ */
+export async function listMfaDevices(
+  db: Database,
+  userId: string,
+): Promise<MfaDeviceResponse[]> {
+  const rows = await mfaRepo.listByUserId(db, userId)
+  return rows.filter(r => r.isEnabled).map(toMfaDeviceResponse)
+}
+
+/**
+ * Begin enrolling an ADDITIONAL device from the profile (user already signed
+ * in). Enforces the max-2 rule against confirmed devices, clears any stranded
+ * pending enrollment, then creates a fresh disabled row and returns both its id
+ * and the otpauth URI so the client can render the QR and confirm it.
+ *
+ * Unlike {@link prepareMfaEnrollment}, this never deletes confirmed devices.
+ */
+export async function prepareAddMfaDevice(
+  db: Database,
+  userId: string,
+  label?: string,
+): Promise<{ mfaId: string, otpauthUri: string }> {
+  const user = await userRepo.findById(db, userId)
+  if (!user) {
+    throw new AuthError('User not found')
+  }
+
+  const enabledCount = await mfaRepo.countEnabledByUserId(db, userId)
+  if (enabledCount >= MFA_DEVICE_LIMIT) {
+    throw new MfaDeviceRuleError('LIMIT_REACHED', 'Maximum number of MFA devices reached')
+  }
+
+  // Never leave more than one half-finished enrollment lying around.
+  await mfaRepo.deletePendingByUserId(db, userId)
+
+  const secret = generateTotpSecret()
+  const deviceLabel = label?.trim() || `Authenticator ${enabledCount + 1}`
+  const row = await mfaRepo.create(db, {
+    userId,
+    secretEncrypted: encryptSecret(secret),
+    label: deviceLabel,
+  })
+
+  return { mfaId: row.mfaId, otpauthUri: buildTotpUri(secret, user.email) }
+}
+
+/**
+ * Confirm an additional device by verifying its first code. Scoped to the
+ * owner + the specific pending device; on success the device is enabled.
+ */
+export async function verifyAddMfaDevice(
+  db: Database,
+  userId: string,
+  mfaId: string,
+  code: string,
+): Promise<boolean> {
+  const device = await mfaRepo.findByMfaId(db, userId, mfaId)
+  if (!device || device.isEnabled) {
+    return false
+  }
+
+  const secret = decryptSecret(device.secretEncrypted)
+  if (!await verifyTotp(secret, code)) {
+    return false
+  }
+
+  await mfaRepo.enableByMfaId(db, userId, mfaId)
+  return true
+}
+
+/**
+ * Remove a device. Refuses to remove the user's last confirmed device (a user
+ * must always keep at least one), and refuses unknown ids.
+ */
+export async function deleteMfaDevice(
+  db: Database,
+  userId: string,
+  mfaId: string,
+): Promise<void> {
+  const device = await mfaRepo.findByMfaId(db, userId, mfaId)
+  if (!device) {
+    throw new MfaDeviceRuleError('NOT_FOUND', 'MFA device not found')
+  }
+
+  if (device.isEnabled) {
+    const enabledCount = await mfaRepo.countEnabledByUserId(db, userId)
+    if (enabledCount <= 1) {
+      throw new MfaDeviceRuleError('LAST_DEVICE', 'Cannot remove the last MFA device')
+    }
+  }
+
+  await mfaRepo.deleteByMfaId(db, userId, mfaId)
+}
+
+/** Map a DB device row to the safe client shape (drops the encrypted secret). */
+function toMfaDeviceResponse(row: mfaRepo.UserMfaRow): MfaDeviceResponse {
+  return {
+    mfaId: row.mfaId,
+    label: row.label,
+    mfaType: row.mfaType,
+    isEnabled: row.isEnabled,
+    verifiedAt: row.verifiedAt ? row.verifiedAt.toISOString() : null,
+    createdAt: row.createdAt.toISOString(),
+  }
 }
