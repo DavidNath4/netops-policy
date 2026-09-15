@@ -1,0 +1,107 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* NetOps design tokens — extracted from the Figma "Network ops app" file. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --color-surface: #f5f7fa;      /* app background */
+  --color-panel: #ffffff;        /* cards, header, inputs */
+  --color-line: #dee3eb;         /* borders */
+  --color-sidebar: #1a212e;      /* dark sidebar + primary ink */
+  --color-sidebar-muted: #8c99ad;/* sidebar section label */
+  --color-sidebar-text: #edf2fa; /* sidebar link text */
+  --color-brand: #1a57ab;        /* primary blue */
+  --color-ink: #1a212e;          /* headings / body */
+  --color-muted: #6e788a;        /* secondary text */
+  --color-ok: #1f8c52;           /* active / success */
+  --color-bad: #b22e2e;          /* failed / danger */
+  --color-terminal: #12171f;     /* command result box */
+  --color-terminal-text: #d9e5f2;
+}
+
+/* -------------------------------------------------------------------------
+   Nuxt UI semantic tokens -> NetOps light palette (single source of truth).
+
+   Nuxt UI v4 drives every component (UModal, UInput, USelect, UDropdownMenu,
+   UBadge, tables, …) from the --ui-* CSS variables. Its defaults ship a full
+   dark theme under the `.dark` class, and a stray `.dark` (SSR flash, a stale
+   color-mode value in localStorage, or the OS preference) makes overlays such
+   as the Administration modals render dark.
+
+   We pin these tokens to the NetOps light values AND repeat them under `.dark`
+   so the theme is light no matter what color mode resolves to — no per-modal
+   `:ui` patching required. This is the app's only theme; there is no dark mode.
+   ------------------------------------------------------------------------- */
+:root,
+.light,
+.dark {
+  --ui-primary: var(--color-brand);
+
+  /* Backgrounds — panels/inputs/modals on white, subtle greys off the surface. */
+  --ui-bg: var(--color-panel);
+  --ui-bg-muted: var(--color-surface);
+  --ui-bg-elevated: var(--color-surface);
+  --ui-bg-accented: var(--color-line);
+  --ui-bg-inverted: var(--color-ink);
+
+  /* Text — ink for body/headings, muted for secondary, white when inverted. */
+  --ui-text-dimmed: var(--color-muted);
+  --ui-text-muted: var(--color-muted);
+  --ui-text-toned: var(--color-muted);
+  --ui-text: var(--color-ink);
+  --ui-text-highlighted: var(--color-ink);
+  --ui-text-inverted: #ffffff;
+
+  /* Borders / rings / dividers — the NetOps hairline colour. */
+  --ui-border: var(--color-line);
+  --ui-border-muted: var(--color-line);
+  --ui-border-accented: var(--color-line);
+  --ui-border-inverted: var(--color-ink);
+}
+
+html, body, #__nuxt {
+  background: var(--color-surface);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+}
+
+/* Force a light UA color-scheme everywhere. This keeps native chrome — form
+   controls and, notably, scrollbars (e.g. the MFA device list inside the
+   Profile modal once it overflows) — light even if a stray `.dark` class makes
+   Nuxt UI apply `scheme-dark`. The app is light-only. */
+:root {
+  color-scheme: light;
+}
+
+/* Explicit light scrollbars. `color-scheme: light` alone is not enough on
+   Chromium/Windows when the OS uses a dark theme — the overflow area (like the
+   Profile modal's MFA list) still paints a dark native scrollbar. Style it
+   directly so it matches the NetOps light surface everywhere. */
+* {
+  scrollbar-color: var(--color-line) transparent; /* Firefox: thumb, track */
+  scrollbar-width: thin;
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+*::-webkit-scrollbar-track {
+  background: var(--color-surface);
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: var(--color-line);
+  border: 2px solid var(--color-surface);
+  border-radius: 9999px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: var(--color-muted);
+}
+
+*::-webkit-scrollbar-corner {
+  background: var(--color-surface);
+}

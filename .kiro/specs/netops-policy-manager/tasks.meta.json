@@ -1,0 +1,396 @@
+{
+  "pbtResults": {},
+  "executionHistory": {
+    "1.1 Initialize Nuxt 3 project and package manifest": [
+      {
+        "executionId": "5ebe54a6-ee46-43fe-9d24-5e4723299226",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788832732753
+      },
+      {
+        "executionId": "5ebe54a6-ee46-43fe-9d24-5e4723299226",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788832858234
+      }
+    ],
+    "1.2 Configure TypeScript, Nuxt, Tailwind, ESLint, and app root": [
+      {
+        "executionId": "5ebe54a6-ee46-43fe-9d24-5e4723299226",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788832863170
+      },
+      {
+        "executionId": "5ebe54a6-ee46-43fe-9d24-5e4723299226",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788833924996
+      }
+    ],
+    "1. Minimal scaffold so the UI runs immediately": [
+      {
+        "executionId": "5ebe54a6-ee46-43fe-9d24-5e4723299226",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788833925045
+      }
+    ],
+    "2.1 Build the app shell and layouts": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849144450
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849158875
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849584000
+      }
+    ],
+    "2.2 Build reusable UI components": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849144655
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849160205
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849584771
+      }
+    ],
+    "2.3 Build the mock data layer and stubbed API composable": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849144838
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849161084
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849902651
+      }
+    ],
+    "2.4 Build the login and dashboard pages (mock data)": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849144996
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849910425
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850394374
+      }
+    ],
+    "2.5 Build the ACL pages (mock data)": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145206
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849911277
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850395518
+      }
+    ],
+    "2.6 Build the route pages (mock data)": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145363
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849912224
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850396470
+      }
+    ],
+    "2.7 Build the administration (user mapping) page (mock data)": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145513
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849913623
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850397869
+      }
+    ],
+    "2.8 Build the log trail page (mock data)": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145671
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849914607
+      },
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850398692
+      }
+    ],
+    "3. Checkpoint - frontend visible on mock data": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145833
+      }
+    ],
+    "4.1 Implement network primitive schemas": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849145998
+      }
+    ],
+    "4.3 Implement ACL, route, and user schemas with cross-field rules": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849146151
+      }
+    ],
+    "4.5 Implement audit, pagination, and common envelope schemas": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849146302
+      }
+    ],
+    "5.1 Implement environment config schema and startup validation plugin": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849146535
+      }
+    ],
+    "6.1 Define Drizzle enums and tables": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849146675
+      }
+    ],
+    "6.2 Create Drizzle client factory and config, generate initial migration": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849146871
+      }
+    ],
+    "6.3 Create roles and initial admin seed": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147023
+      }
+    ],
+    "7.1 Implement password and session primitives": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147161
+      }
+    ],
+    "7.2 Implement session repository and session middleware": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147340
+      }
+    ],
+    "8.1 Implement permissions, role mapping, and guards": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147489
+      }
+    ],
+    "9.1 Implement envelope helpers and error handler": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147645
+      }
+    ],
+    "10.1 Implement domain models and mappers": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147799
+      }
+    ],
+    "10.3 Implement command generators": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849147982
+      }
+    ],
+    "10.5 Implement data repositories": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148170
+      }
+    ],
+    "10.6 Implement AuthService and AuditService": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148308
+      }
+    ],
+    "10.7 Implement UserService": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148455
+      }
+    ],
+    "10.8 Implement AclService and RouteService": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148597
+      }
+    ],
+    "10.9 Implement DashboardService": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148747
+      }
+    ],
+    "11. Checkpoint - server foundation": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849148904
+      }
+    ],
+    "12.1 Implement auth and health handlers": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149051
+      }
+    ],
+    "12.2 Implement user handlers": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149209
+      }
+    ],
+    "12.3 Implement ACL and route handlers": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149355
+      }
+    ],
+    "12.4 Implement audit and dashboard handlers": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149513
+      }
+    ],
+    "13.1 Replace the mock API layer with real envelope-aware fetch and auth composables": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149765
+      }
+    ],
+    "13.2 Wire auth, dashboard, ACL, and route pages to live endpoints": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849149915
+      }
+    ],
+    "13.3 Wire administration and log trail pages to live endpoints": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849150175
+      }
+    ],
+    "14. Checkpoint - application wired end to end": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849150402
+      }
+    ],
+    "16.1 Create multi-stage Dockerfile and .dockerignore": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849150592
+      }
+    ],
+    "16.2 Write README": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849150757
+      }
+    ],
+    "17.1 Run typecheck, lint, tests, and production build; fix until all pass": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788849150907
+      }
+    ],
+    "2. Frontend-first: build the full visible UI on mock data": [
+      {
+        "executionId": "66f43eed-ffde-477d-99b8-3a511184dcd6",
+        "chatSessionId": "sess_ebf752c6-fb9c-456f-9432-7aec809efe5d",
+        "timestamp": 1788850398728
+      }
+    ]
+  }
+}

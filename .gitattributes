@@ -1,0 +1,23 @@
+# Normalize line endings: Git stores LF, checks out native on each OS.
+# Keeps diffs clean when the repo is shared across Windows/macOS/Linux.
+* text=auto eol=lf
+
+# Windows batch files must stay CRLF to run correctly.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets — never normalize or diff as text.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary
+*.pdf binary
+
+# Lockfiles: treat as generated in diffs/reviews.
+package-lock.json linguist-generated=true
