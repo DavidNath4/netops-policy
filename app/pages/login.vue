@@ -8,17 +8,22 @@ definePageMeta({ layout: 'auth' })
 
 const { login } = useAuth()
 
-const email = ref('')
+const identifier = ref('')
 const password = ref('')
 const showPassword = ref(false)
-const errors = reactive<{ email?: string, password?: string }>({})
+const errors = reactive<{ identifier?: string, password?: string }>({})
 const submitError = ref<string | undefined>()
 const loading = ref(false)
 
+/** Pull the API error code out of a thrown $fetch error, if present. */
+function errorCode(err: unknown): string | undefined {
+  return (err as { data?: { error?: { code?: string } } })?.data?.error?.code
+}
+
 function validate(): boolean {
-  errors.email = email.value.trim() ? undefined : 'Email is required'
+  errors.identifier = identifier.value.trim() ? undefined : 'Username or email is required'
   errors.password = password.value ? undefined : 'Password is required'
-  return !errors.email && !errors.password
+  return !errors.identifier && !errors.password
 }
 
 async function onSubmit() {
@@ -27,7 +32,7 @@ async function onSubmit() {
 
   loading.value = true
   try {
-    const status = await login(email.value.trim(), password.value)
+    const status = await login(identifier.value.trim(), password.value)
     // Don't retain the password after the request.
     password.value = ''
     if (status === 'MFA_SETUP_REQUIRED') {
@@ -37,9 +42,20 @@ async function onSubmit() {
       await navigateTo('/mfa/verify')
     }
   }
-  catch {
+  catch (err) {
     password.value = ''
-    submitError.value = 'Invalid credentials. Please try again.'
+    // Distinct, honest feedback: disabled account and directory outage differ
+    // from a plain credential failure.
+    switch (errorCode(err)) {
+      case 'ACCOUNT_DISABLED':
+        submitError.value = 'This account is disabled. Please contact your administrator.'
+        break
+      case 'AD_UNREACHABLE':
+        submitError.value = 'Cannot reach the authentication directory right now. Please try again later.'
+        break
+      default:
+        submitError.value = 'Invalid credentials. Please try again.'
+    }
   }
   finally {
     loading.value = false
@@ -71,14 +87,14 @@ async function onSubmit() {
           </p>
 
           <form class="mt-8 flex flex-col gap-5" novalidate @submit.prevent="onSubmit">
-            <FormField label="Email" name="email" :error="errors.email" required>
+            <FormField label="Username or email" name="identifier" :error="errors.identifier" required>
               <template #default="{ id, invalid, describedBy }">
                 <UInput
                   :id="id"
-                  v-model="email"
-                  type="email"
+                  v-model="identifier"
+                  type="text"
                   autocomplete="username"
-                  placeholder="Enter email"
+                  placeholder="Enter username or email"
                   color="neutral"
                   variant="outline"
                   :aria-invalid="invalid"

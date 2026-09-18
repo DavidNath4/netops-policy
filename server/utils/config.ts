@@ -32,7 +32,34 @@ export const EnvSchema = z.object({
     .int()
     .positive('MFA_CHALLENGE_TTL_MINUTES must be a positive integer')
     .default(5),
+
+  // -------------------------------------------------------------------------
+  // Active Directory (AD / LDAP) authentication. See .kiro/specs/ad-authentication.
+  // AD_URL / AD_BASE_DN / AD_BIND_DN / AD_BIND_PASSWORD are required only when
+  // AD_ENABLED is true (enforced by the refinement below).
+  // -------------------------------------------------------------------------
+  AD_ENABLED: z.coerce.boolean().default(false),
+  // Enables LOCAL (email + password) logins. true in dev; false in AD-only prod.
+  AUTH_LOCAL_ENABLED: z.coerce.boolean().default(true),
+  AD_URL: z.string().optional(),
+  AD_BASE_DN: z.string().optional(),
+  AD_BIND_DN: z.string().optional(),
+  AD_BIND_PASSWORD: z.string().optional(),
+  // Bounded connect/operation timeout so an unresponsive directory fails fast.
+  AD_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive('AD_TIMEOUT_MS must be a positive integer')
+    .default(5000),
 })
+  .refine(
+    env => !env.AD_ENABLED || (env.AD_URL && env.AD_BASE_DN && env.AD_BIND_DN && env.AD_BIND_PASSWORD),
+    {
+      message:
+        'When AD_ENABLED is true, AD_URL, AD_BASE_DN, AD_BIND_DN and AD_BIND_PASSWORD are all required',
+      path: ['AD_ENABLED'],
+    },
+  )
 
 export type Env = z.infer<typeof EnvSchema>
 

@@ -148,7 +148,7 @@ Applied via the existing `db:seed` command (Req 1.3, 2.3, 3.4; NFR Maintainabili
 | **L2_ENGINEER** | `ACL_POLICIES_SHOW`, `ACL_POLICIES_ADD`, `ACL_POLICIES_DELETE`, `ROUTES_SHOW`, `ROUTES_ADD`, `ROUTES_DELETE` |
 | **ADMINISTRATOR** | all six ACL/Route permissions + `ADMINISTRATION_SHOW`, `ADMINISTRATION_MANAGE` |
 
-The seeded admin account (from `SEED_USER_*` env) is assigned `role_id` of `ADMINISTRATOR`.
+In development, the seeded LOCAL admin account (from `SEED_USER_*` env) is assigned `role_id` of `ADMINISTRATOR`. Users provisioned just-in-time from Active Directory are created with `role_id = null` (common access) and receive a role only when an administrator assigns one; in an AD-only deployment the first administrator is bootstrapped by an operator setting `users.role_id` to the `ADMINISTRATOR` role directly in the database after that AD user's first login (Req 4.6, 4.7; see the Active Directory Authentication spec).
 
 ## Permission Resolution & Enforcement
 

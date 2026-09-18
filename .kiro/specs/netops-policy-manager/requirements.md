@@ -4,14 +4,20 @@
 
 NetOps Policy Manager is a lightweight internal web application for authoring, reviewing, and auditing network Access Control List (ACL) and route policies. It provides authenticated, role-based management of users, ACL policies, and routes, and generates vendor-agnostic device command previews without executing anything against live network devices.
 
-The system is built with TypeScript (strict), Nuxt + Vue 3 + Nitro, Tailwind + Nuxt UI, Zod, Drizzle ORM with PostgreSQL, Argon2-based server-side sessions, and Vitest, and is packaged as a single multi-stage Docker image. It is intentionally scoped to policy authoring and previewing: it never pushes configuration to routers, firewalls, or switches, and it never provisions its own database.
+The system is built with TypeScript (strict), Nuxt + Vue 3 + Nitro, Tailwind + Nuxt UI, Zod, Drizzle ORM with PostgreSQL, Argon2-based password hashing, hash-only server-side sessions, a NetOps-managed TOTP second factor, and Vitest, and is packaged as a single multi-stage Docker image. It is intentionally scoped to policy authoring and previewing: it never pushes configuration to routers, firewalls, or switches, and it never provisions its own database.
+
+Authentication supports two account origins (`auth_provider`): **LOCAL** accounts (email + Argon2 password) and **AD** accounts (verified against Active Directory via an LDAP bind). Both origins share the same NetOps-managed TOTP second factor and the same session issuance. The Active Directory provider, its provisioning, routing, and error handling are specified in the dedicated **Active Directory Authentication** spec (`.kiro/specs/ad-authentication/`); this document defines the authentication guarantees the rest of the system depends on.
 
 This document defines the functional requirements (grouped by capability area), non-functional requirements, and explicit out-of-scope boundaries.
 
 ## Glossary
 
 - **NetOps_Policy_Manager**: The complete web application system described in this document.
-- **Auth_Service**: The server-side component responsible for authentication, session issuance, and session validation.
+- **Auth_Service**: The server-side component responsible for first-factor verification (LOCAL password or AD bind), MFA challenge issuance, session issuance, and session validation.
+- **Auth_Provider**: The persisted origin of an account: `LOCAL` (email + Argon2 password) or `AD` (Active Directory bind). Stored on `users.auth_provider`.
+- **First_Factor**: Identity + password verification. For LOCAL accounts this is an Argon2 password check; for AD accounts it is an LDAP bind against Active Directory.
+- **MFA_Service**: The server-side component that manages TOTP enrollment and verification (the second factor), shared by all account origins.
+- **MFA_Challenge**: A short-lived, signed pre-auth token (carried in a cookie) issued after a successful First_Factor, bearing the user id and a purpose (`MFA_ENROLLMENT` or `MFA_LOGIN`). A session is created only after the second factor tied to this challenge succeeds.
 - **Session_Store**: The server-side persistence of active sessions, storing only the hash of each session token.
 - **Authorization_Service**: The server-side component that evaluates permissions against roles via `hasPermission()` and `requirePermission()`.
 - **User_Admin_Service**: The server-side component that manages user accounts.
@@ -37,21 +43,28 @@ This document defines the functional requirements (grouped by capability area), 
 
 ### Requirement 1: Authentication
 
-**User Story:** As an operator, I want to log in with a username and password and maintain a secure server-side session, so that only verified individuals can access the application.
+**User Story:** As an operator, I want to log in with my email (or directory identifier) and password, complete a TOTP second factor, and maintain a secure server-side session, so that only verified individuals with a second factor can access the application.
+
+Authentication is a two-step flow. The **first factor** verifies identity and password — against an Argon2 hash for LOCAL accounts, or against Active Directory via an LDAP bind for AD accounts. The **second factor** is a NetOps-managed TOTP code. A session is created only after the second factor succeeds. The AD first factor, provider routing, provisioning, and directory error handling are specified in the **Active Directory Authentication** spec (`.kiro/specs/ad-authentication/`).
 
 #### Acceptance Criteria
 
-1. WHEN a client sends a valid username and password to `POST /api/auth/login`, THE Auth_Service SHALL verify the password against an Argon2 hash and issue a Session_Token.
-2. WHEN the Auth_Service issues a Session_Token, THE Auth_Service SHALL set the raw Session_Token in an HttpOnly, SameSite cookie.
-3. WHERE the runtime is a Production_Environment, THE Auth_Service SHALL set the Secure attribute on the session cookie.
-4. WHEN the Auth_Service issues a Session_Token, THE Session_Store SHALL persist only a hash of the Session_Token and SHALL NOT persist the raw Session_Token.
-5. WHEN the Auth_Service creates a session, THE Session_Store SHALL record an expiry timestamp and a last-used timestamp for the session.
-6. WHEN an authenticated request is validated, THE Auth_Service SHALL update the session last-used timestamp.
-7. IF a request presents a Session_Token whose corresponding session is expired, THEN THE Auth_Service SHALL reject the request with HTTP status 401.
-8. WHEN a client sends `POST /api/auth/logout` with a valid session, THE Auth_Service SHALL invalidate the corresponding session in the Session_Store.
-9. WHEN a client sends `GET /api/auth/me` with a valid session, THE Auth_Service SHALL return the authenticated user identity and permissions in the API_Envelope.
-10. IF a login attempt fails due to an unknown username or incorrect password, THEN THE Auth_Service SHALL reject the request with HTTP status 401 and SHALL record a LOGIN_FAILED audit entry.
-11. WHEN a login attempt succeeds, THE Audit_Service SHALL record a LOGIN_SUCCESS audit entry.
+1. WHEN a client sends a valid identifier and password to `POST /api/auth/login`, THE Auth_Service SHALL verify the First_Factor — an Argon2 password check for a LOCAL account, or an Active Directory bind for an AD account — and SHALL NOT create a session at this step.
+2. WHEN the First_Factor succeeds for a user who has no confirmed MFA device, THE Auth_Service SHALL issue an MFA_Challenge with purpose `MFA_ENROLLMENT` and SHALL return the status `MFA_SETUP_REQUIRED`.
+3. WHEN the First_Factor succeeds for a user who has a confirmed MFA device, THE Auth_Service SHALL issue an MFA_Challenge with purpose `MFA_LOGIN` and SHALL return the status `MFA_REQUIRED`.
+4. WHEN a client presents a valid `MFA_ENROLLMENT` challenge to the MFA setup endpoints, THE MFA_Service SHALL allow the user to enroll a TOTP device and confirm it with a valid code before any session is created.
+5. WHEN a client sends a valid TOTP code with a valid `MFA_LOGIN` challenge to `POST /api/auth/mfa/verify`, THE Auth_Service SHALL create a session and return the status `AUTHENTICATED` with the user identity.
+6. IF a client presents a TOTP code with no valid MFA_Challenge, an expired challenge, or an incorrect code, THEN THE Auth_Service SHALL reject the request with HTTP status 401 and SHALL NOT create a session.
+7. WHEN the Auth_Service creates a session, THE Auth_Service SHALL set the raw Session_Token in an HttpOnly, SameSite cookie, and THE Session_Store SHALL persist only a hash of the Session_Token, never the raw token.
+8. WHERE the runtime is a Production_Environment, THE Auth_Service SHALL set the Secure attribute on the session cookie.
+9. WHEN the Auth_Service creates a session, THE Session_Store SHALL record an expiry timestamp and a last-used timestamp, and WHEN an authenticated request is validated THE Auth_Service SHALL update the last-used timestamp.
+10. IF a request presents a Session_Token whose corresponding session is expired, THEN THE Auth_Service SHALL reject the request with HTTP status 401.
+11. WHEN a client sends `POST /api/auth/logout` with a valid session, THE Auth_Service SHALL invalidate the corresponding session in the Session_Store.
+12. WHEN a client sends `GET /api/auth/me` with a valid session, THE Auth_Service SHALL return the authenticated user identity and permissions in the API_Envelope.
+13. IF a login attempt fails due to an unknown identifier or incorrect password, THEN THE Auth_Service SHALL reject the request with HTTP status 401 using a generic invalid-credentials message and SHALL record a LOGIN_FAILED audit entry.
+14. IF a login identifier matches an existing user whose `is_active` is false, THEN THE Auth_Service SHALL reject the attempt before any first-factor verification with a distinct account-disabled error, and for an AD account SHALL do so before contacting Active Directory.
+15. WHEN a login attempt fully succeeds (first and second factor), THE Audit_Service SHALL record a LOGIN_SUCCESS audit entry.
+16. THE Auth_Service SHALL store passwords only for LOCAL accounts as Argon2 hashes, SHALL leave `password_hash` null for AD accounts, and SHALL never persist any AD user's directory password.
 
 ### Requirement 2: Authorization and Role-Based Access Control
 
@@ -196,12 +209,12 @@ This document defines the functional requirements (grouped by capability area), 
 
 #### Acceptance Criteria
 
-1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, permissions, roles_permissions, sessions, acl_policies, routes, and audit_logs.
+1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, permissions, roles_permissions, sessions, user_mfa, acl_policies, routes, and audit_logs.
 2. THE Data_Layer SHALL use UUID values as primary key identifiers.
-3. THE Data_Layer SHALL enforce a unique constraint on the users username column.
+3. THE Data_Layer SHALL enforce a unique constraint on the users email column, and a unique constraint on the users external_id column for directory-provisioned accounts.
 4. THE Data_Layer SHALL define foreign key constraints between related tables.
 5. THE Data_Layer SHALL prevent duplicate Permission assignments for the same Role via a unique constraint on `roles_permissions(role_id, permission_id)`.
-6. THE Data_Layer SHALL define indexes on username, ACL name, ACL status, change_ticket, route destination, route status, audit timestamp, audit actor, and audit activity.
+6. THE Data_Layer SHALL define indexes on user email, user role_id, session token hash, session user, ACL name, ACL status, change_ticket, route destination, route status, audit timestamp, audit actor, and audit activity.
 7. THE Data_Layer SHALL execute all queries as parameterized Drizzle queries.
 
 ### Requirement 11: Application Schema Layering
@@ -252,8 +265,8 @@ This document defines the functional requirements (grouped by capability area), 
 
 #### Acceptance Criteria
 
-1. THE NetOps_Policy_Manager SHALL provide a `.env.example` file containing `NODE_ENV`, `DATABASE_URL`, and `SESSION_SECRET` placeholder entries without real credentials.
-2. WHEN the application starts, THE Config_Service SHALL validate the required environment variables with a Zod schema.
+1. THE NetOps_Policy_Manager SHALL provide a `.env.example` file containing placeholder entries — without real credentials — for at least `NODE_ENV`, `DATABASE_URL`, `SESSION_SECRET`, `MFA_ENCRYPTION_KEY`, `SESSION_TTL_HOURS`, `MFA_CHALLENGE_TTL_MINUTES`, the seed-user variables, and the Active Directory variables (`AD_ENABLED`, `AUTH_LOCAL_ENABLED`, `AD_URL`, `AD_BASE_DN`, `AD_BIND_DN`, `AD_BIND_PASSWORD`, and any AD timeout/discovery flags) as specified in the Active Directory Authentication spec.
+2. WHEN the application starts, THE Config_Service SHALL validate the required environment variables with a Zod schema, including the conditional AD variables that become required when `AD_ENABLED` is true.
 3. IF a required environment variable is missing or invalid at startup, THEN THE Config_Service SHALL halt startup with an error.
 4. THE NetOps_Policy_Manager SHALL NOT create or provision a PostgreSQL database.
 5. THE NetOps_Policy_Manager SHALL NOT run database migrations automatically at startup.
@@ -268,8 +281,9 @@ This document defines the functional requirements (grouped by capability area), 
 1. THE NetOps_Policy_Manager SHALL provide a `db:generate` command that produces Drizzle migrations.
 2. THE NetOps_Policy_Manager SHALL provide a `db:migrate` command that applies Drizzle migrations explicitly.
 3. THE NetOps_Policy_Manager SHALL provide a `db:seed` command that seeds the roles `ADMINISTRATOR`, `L2_ENGINEER`, and `NOC`, the initial permission catalog, and the initial role→permission mapping (as specified in the RBAC & Permissions spec).
-4. WHEN the `db:seed` command runs, THE NetOps_Policy_Manager SHALL create an initial admin account using credentials sourced from environment variables and SHALL assign it the `ADMINISTRATOR` role.
+4. WHEN the `db:seed` command runs in development, THE NetOps_Policy_Manager SHALL create an initial LOCAL admin account using credentials sourced from environment variables and SHALL assign it the `ADMINISTRATOR` role.
 5. THE NetOps_Policy_Manager SHALL NOT hardcode the initial admin credentials in source code.
+6. WHERE the runtime is a Production_Environment configured for Active-Directory-only authentication, THE NetOps_Policy_Manager SHALL be operable without the seeded LOCAL admin, and the first administrator SHALL be established by an operator assigning the `ADMINISTRATOR` role to an already-provisioned AD user directly in the database, as specified in the Active Directory Authentication spec.
 
 ### Requirement 16: Packaging and Deployment
 
@@ -310,11 +324,12 @@ This document defines the functional requirements (grouped by capability area), 
 
 ### Security
 
-1. THE NetOps_Policy_Manager SHALL store passwords only as Argon2 hashes.
+1. THE NetOps_Policy_Manager SHALL store LOCAL passwords only as Argon2 hashes, and SHALL never store any AD user's directory password or a hash of it (`password_hash` stays null for AD accounts).
 2. THE NetOps_Policy_Manager SHALL store only session token hashes and SHALL keep raw Session_Tokens in HttpOnly cookies.
-3. THE NetOps_Policy_Manager SHALL enforce all authentication and authorization checks on the server.
-4. THE NetOps_Policy_Manager SHALL prevent mass-assignment by accepting mutations only through explicit request schemas.
-5. THE NetOps_Policy_Manager SHALL exclude secrets, credentials, and sensitive internal details from client responses, audit entries, and the health endpoint.
+3. THE NetOps_Policy_Manager SHALL store TOTP secrets only in encrypted form (AES-256-GCM) and SHALL never return a TOTP secret to the client except within the enrollment otpauth URI needed to render the QR code.
+4. THE NetOps_Policy_Manager SHALL enforce all authentication and authorization checks on the server.
+5. THE NetOps_Policy_Manager SHALL prevent mass-assignment by accepting mutations only through explicit request schemas.
+6. THE NetOps_Policy_Manager SHALL exclude secrets, credentials, and sensitive internal details from client responses, audit entries, and the health endpoint.
 
 ### Performance and Footprint
 

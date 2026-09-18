@@ -255,7 +255,9 @@ Nuxt convention adjustments:
 // database/schema/index.ts
 import { pgEnum } from 'drizzle-orm/pg-core';
 
-export const userStatusEnum = pgEnum('user_status', ['ACTIVE', 'DISABLED']);
+export const authProviderEnum = pgEnum('auth_provider', ['LOCAL', 'AD']);   // account origin (users)
+export const mfaTypeEnum      = pgEnum('mfa_type',      ['TOTP']);          // second-factor type (user_mfa)
+// User active/disabled state is a boolean `users.is_active`, not an enum.
 export const aclStatusEnum  = pgEnum('acl_status',  ['DRAFT', 'ACTIVE', 'DISABLED']);
 export const routeStatusEnum= pgEnum('route_status',['DRAFT', 'ACTIVE', 'DISABLED']);
 export const protocolEnum   = pgEnum('protocol',    ['TCP', 'UDP', 'ICMP', 'ANY']);   // Req 4.4
@@ -265,27 +267,37 @@ export const auditResultEnum= pgEnum('audit_result',['SUCCESS', 'FAILURE']);
 
 ### Drizzle Schema
 
-Requirement mapping: UUID primary keys (Req 10.2), unique username (Req 10.3), FKs (Req 10.4), no duplicate permission assignments per role (Req 10.5), indexes (Req 10.6).
+Requirement mapping: UUID primary keys (Req 10.2), unique email login identifier (Req 10.3), FKs (Req 10.4), no duplicate permission assignments per role (Req 10.5), indexes (Req 10.6).
 
 > The RBAC tables below (`roles`, `permissions`, `roles_permissions`, and the `users.role_id` column) are specified in full — with initial data, initial mapping, and constraints — in the dedicated **RBAC & Permissions** spec (`.kiro/specs/rbac-permissions/design.md`). They are summarized here so the identity schema reads as a whole.
 
 ```typescript
-// database/schema/users.ts
-import { pgTable, uuid, varchar, timestamp, index } from 'drizzle-orm/pg-core';
-import { userStatusEnum } from './index';
+// database/schema/users.ts — identity foundation (LOCAL + AD)
+import { pgTable, uuid, varchar, text, boolean, timestamp, pgEnum, index, uniqueIndex } from 'drizzle-orm/pg-core';
+import { roles } from './roles';
+
+export const authProviderEnum = pgEnum('auth_provider', ['LOCAL', 'AD']);   // account origin
 
 export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  username: varchar('username', { length: 64 }).notNull().unique(),        // Req 10.3
-  displayName: varchar('display_name', { length: 128 }).notNull(),
-  passwordHash: varchar('password_hash', { length: 255 }).notNull(),       // Argon2 (NFR Sec 1)
-  status: userStatusEnum('status').notNull().default('ACTIVE'),
+  userId: uuid('user_id').primaryKey().defaultRandom(),
+  email: varchar('email', { length: 255 }).notNull(),                       // login identifier (unique)
+  displayName: varchar('display_name', { length: 150 }).notNull(),
+  passwordHash: text('password_hash'),                                      // NULLABLE: null for AD accounts (NFR Sec 1)
+  authProvider: authProviderEnum('auth_provider').notNull().default('LOCAL'),
+  externalId: varchar('external_id', { length: 255 }),                      // immutable AD id (e.g. objectGUID); unique
+  roleId: uuid('role_id').references(() => roles.roleId, { onDelete: 'restrict' }), // nullable; one role per user (RBAC spec)
+  isActive: boolean('is_active').notNull().default(true),
+  lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  usernameIdx: index('users_username_idx').on(t.username),                 // Req 10.6
-}));
+}, (t) => [
+  uniqueIndex('users_email_uidx').on(t.email),                              // Req 10.3
+  uniqueIndex('users_external_id_uidx').on(t.externalId),                   // recognize returning AD users
+  index('users_role_id_idx').on(t.roleId),                                  // Req 10.6
+]);
 ```
+
+The `users` table is the identity foundation for both account origins. LOCAL accounts carry an Argon2 `passwordHash`; AD accounts have `passwordHash = null` and are recognized on return by `externalId` (see the Active Directory Authentication spec). The login identifier is `email` (there is no separate `username` column). `status` is represented by the boolean `isActive` rather than an enum.
 
 ```typescript
 // database/schema/roles.ts — master role table (data-driven RBAC)
@@ -336,24 +348,50 @@ The `users` table gains a nullable `role_id` FK (one role per user for now). The
 ```
 
 ```typescript
-// database/schema/sessions.ts
-import { pgTable, uuid, varchar, timestamp, index } from 'drizzle-orm/pg-core';
+// database/schema/sessions.ts — authenticated sessions (created only after the second factor)
+import { pgTable, uuid, text, varchar, timestamp, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { users } from './users';
 
 export const sessions = pgTable('sessions', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
-  tokenHash: varchar('token_hash', { length: 255 }).notNull().unique(),    // only the hash (Req 1.4, NFR Sec 2)
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),    // Req 1.5
+  sessionId: uuid('session_id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.userId, { onDelete: 'cascade' }),
+  tokenHash: text('token_hash').notNull(),                                 // SHA-256 of the raw token only (Req 1.7, NFR Sec 2)
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),    // Req 1.9
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  lastUsedAt: timestamp('last_used_at', { withTimezone: true }).notNull().defaultNow(), // Req 1.5, 1.6
+  lastUsedAt: timestamp('last_used_at', { withTimezone: true }),           // Req 1.9
   sourceIp: varchar('source_ip', { length: 64 }),
   userAgent: varchar('user_agent', { length: 512 }),
-}, (t) => ({
-  tokenHashIdx: index('sessions_token_hash_idx').on(t.tokenHash),
-  userExpiresIdx: index('sessions_user_expires_idx').on(t.userId, t.expiresAt),
-}));
+}, (t) => [
+  uniqueIndex('sessions_token_hash_uidx').on(t.tokenHash),
+  index('sessions_user_id_idx').on(t.userId),
+  index('sessions_expires_at_idx').on(t.expiresAt),
+]);
 ```
+
+```typescript
+// database/schema/user-mfa.ts — TOTP second-factor devices (shared by LOCAL and AD users)
+import { pgTable, uuid, text, boolean, timestamp, index } from 'drizzle-orm/pg-core';
+import { users } from './users';
+import { mfaTypeEnum } from './index';
+
+// A user may enrol up to MFA_DEVICE_LIMIT (2) TOTP devices; the cap is enforced
+// in the service layer, so there is intentionally NO unique index on user_id.
+export const userMfa = pgTable('user_mfa', {
+  mfaId: uuid('mfa_id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.userId, { onDelete: 'cascade' }),
+  mfaType: mfaTypeEnum('mfa_type').notNull().default('TOTP'),
+  label: text('label').notNull().default('Authenticator'),
+  secretEncrypted: text('secret_encrypted').notNull(),                     // AES-256-GCM at rest (NFR Sec 3)
+  isEnabled: boolean('is_enabled').notNull().default(false),               // true only after first code confirmed
+  verifiedAt: timestamp('verified_at', { withTimezone: true }),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+}, (t) => [
+  index('user_mfa_user_id_idx').on(t.userId),
+]);
+```
+
+A session row exists only after the TOTP second factor tied to an MFA_Challenge succeeds (Req 1.5, 1.7). The raw session token is never stored — only its SHA-256 hash — and lives client-side solely in the `netops_session` HttpOnly cookie. The pre-auth MFA_Challenge itself is **not** a table: it is a short-lived, HMAC-signed cookie (`netops_mfa_challenge`, keyed by `SESSION_SECRET`, TTL `MFA_CHALLENGE_TTL_MINUTES`) carrying the user id and purpose (`MFA_ENROLLMENT | MFA_LOGIN`).
 
 ```typescript
 // database/schema/acl-policies.ts
@@ -375,8 +413,8 @@ export const aclPolicies = pgTable('acl_policies', {
   description: varchar('description', { length: 1000 }),
   status: aclStatusEnum('status').notNull().default('DRAFT'),
   generatedCommand: varchar('generated_command', { length: 2000 }).notNull(), // server-set (Req 4.11)
-  createdBy: uuid('created_by').notNull().references(() => users.id),           // Req 10.4
-  updatedBy: uuid('updated_by').notNull().references(() => users.id),
+  createdBy: uuid('created_by').notNull().references(() => users.userId),       // Req 10.4
+  updatedBy: uuid('updated_by').notNull().references(() => users.userId),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -404,8 +442,8 @@ export const routes = pgTable('routes', {
   changeTicket: varchar('change_ticket', { length: 64 }),
   status: routeStatusEnum('status').notNull().default('DRAFT'),
   generatedCommand: varchar('generated_command', { length: 2000 }).notNull(), // server-set (Req 6.8)
-  createdBy: uuid('created_by').notNull().references(() => users.id),
-  updatedBy: uuid('updated_by').notNull().references(() => users.id),
+  createdBy: uuid('created_by').notNull().references(() => users.userId),
+  updatedBy: uuid('updated_by').notNull().references(() => users.userId),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => ({
@@ -544,27 +582,35 @@ export const RouteResponseSchema = RouteBase.extend({
 #### User schemas (`shared/schemas/user.ts`) — Req 3
 
 ```typescript
-export const CreateUserSchema = z.object({
-  username: z.string().min(1).max(64),
-  displayName: z.string().min(1).max(128),
-  password: z.string().min(12),        // hashed server-side; never stored raw
-  roleCode: z.enum(['ADMIN', 'L2', 'NOC']),
+// Administration create — LOCAL user with a role. roleCode is validated against
+// existing active roles at runtime (not a hardcoded union), so new roles work
+// without a code change (see RBAC spec). AD users are NOT created here — they
+// are provisioned just-in-time on first AD login.
+export const AdminCreateUserSchema = z.object({
+  email: z.string().trim().toLowerCase().max(255).email(),
+  displayName: z.string().trim().min(1).max(150),
+  password: z.string().min(8).max(128),        // hashed server-side; never stored raw
+  roleCode: z.string().trim().min(1).max(50),  // e.g. ADMINISTRATOR | L2_ENGINEER | NOC | future
 });
-export const UpdateUserSchema = z.object({ displayName: z.string().min(1).max(128) });
-export const ChangeUserRoleSchema = z.object({ roleCode: z.enum(['ADMIN', 'L2', 'NOC']) });   // Req 3.4
-export const ResetPasswordSchema = z.object({ password: z.string().min(12) });                // Req 3.6
+export const AdminUpdateUserSchema = z.object({ displayName: z.string().trim().min(1).max(150) });
+export const AdminChangeRoleSchema = z.object({ roleCode: z.string().trim().min(1).max(50) });  // Req 3.4
+export const AdminSetStatusSchema  = z.object({ isActive: z.boolean() });                        // Req 3.5
+export const AdminResetPasswordSchema = z.object({ password: z.string().min(8).max(128) });      // Req 3.6
 
-// Never exposes password, passwordHash, or token (Req 3.7, NFR Sec 5)
+// Safe user shape. Never exposes password, passwordHash, externalId, or token (Req 3.7, NFR Sec 6).
 export const UserResponseSchema = z.object({
-  id: z.string().uuid(),
-  username: z.string(),
+  userId: z.string().uuid(),
+  email: z.string().email(),
   displayName: z.string(),
-  status: z.enum(['ACTIVE', 'DISABLED']),
-  roles: z.array(z.enum(['ADMIN', 'L2', 'NOC'])),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+  authProvider: z.enum(['LOCAL', 'AD']),
+  isActive: z.boolean(),
+  lastLoginAt: z.date().nullable(),
+  createdAt: z.date(),
+  updatedAt: z.date(),
 });
 ```
+
+Reset-password applies only to LOCAL accounts; AD accounts have no NetOps-stored password to reset (Req 1.16). The Administration user row surfaced to the client carries the joined `roleCode` / `roleName` (null when unassigned) but never `externalId` or any secret.
 
 #### Audit, pagination, env (`shared/schemas/audit.ts`, `shared/schemas/common.ts`, `server/utils/config.ts`)
 
@@ -599,27 +645,45 @@ export const AuditResponseSchema = z.object({
   metadata: z.unknown().nullable(),
 });
 
-// Startup env validation (Req 14.1, 14.2, 14.3)
+// Startup env validation (Req 14.1, 14.2, 14.3). Validated once by the Nitro
+// validate-env plugin. Server-only — there is no runtimeConfig block.
 export const EnvSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   DATABASE_URL: z.string().url(),
   SESSION_SECRET: z.string().min(32),
+  MFA_ENCRYPTION_KEY: z.string().regex(/^[0-9a-fA-F]{64}$/),   // AES-256-GCM key for TOTP secrets (32 bytes hex)
+  SESSION_TTL_HOURS: z.coerce.number().int().positive().default(8),
+  MFA_CHALLENGE_TTL_MINUTES: z.coerce.number().int().positive().default(5),
+  // Active Directory provider (see ad-authentication spec). AD_URL/BASE_DN/BIND_*
+  // are required only when AD_ENABLED is true (conditional refinement).
+  AD_ENABLED: z.coerce.boolean().default(false),
+  AUTH_LOCAL_ENABLED: z.coerce.boolean().default(true),
+  AD_URL: z.string().optional(),
+  AD_BASE_DN: z.string().optional(),
+  AD_BIND_DN: z.string().optional(),
+  AD_BIND_PASSWORD: z.string().optional(),
+  AD_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+  AD_CAPTURE: z.coerce.boolean().default(false),              // TEMPORARY: Phase-1 discovery only; removed after mapping
+  // SEED_USER_* consumed by db:seed (dev LOCAL admin), not required at runtime.
 });
 ```
 
 ## Components and Interfaces
 
-### Authentication (`server/auth/`)
+### Authentication (`server/auth/`, `server/services/`, `server/utils/`)
 
-- **Token generation** — `randomBytes(32)` from Node `crypto`, base64url-encoded → raw Session_Token (high entropy).
-- **Hashing** — `argon2.hash(password)` for user passwords (NFR Sec 1); `sha256(token)` for the session token hash stored in `sessions.token_hash` (Req 1.4, NFR Sec 2). The raw token lives only in the HttpOnly cookie.
-- **`password.ts`** — `hashPassword(raw)`, `verifyPassword(hash, raw)` using Argon2 (Req 1.1).
-- **`session.ts`** — `generateToken()`, `hashToken(raw)`, `setSessionCookie(event, raw)`, `clearSessionCookie(event)`.
-- **Session repository** — `create({userId, tokenHash, expiresAt, sourceIp, userAgent})`, `findByTokenHash(hash)`, `touch(id)` (updates `lastUsedAt`, Req 1.6), `deleteByTokenHash(hash)` (logout, Req 1.8).
-- **Session middleware** (`server/middleware/01.session.ts`) — reads the cookie, hashes it, looks up the session, checks expiry (expired → context stays unauthenticated so `requirePermission` yields 401, Req 1.7), resolves the user + roles + permissions, updates `lastUsedAt`, and sets `event.context.auth = { user, permissions }`.
-- **Handlers** — `login.post.ts` (verify, issue, LOGIN_SUCCESS / LOGIN_FAILED audit — Req 1.10, 1.11), `logout.post.ts` (invalidate — Req 1.8, LOGOUT audit), `me.get.ts` (return identity + permissions in envelope — Req 1.9).
+Authentication is a two-step flow: a **first factor** (LOCAL password check or AD bind) issues a signed pre-auth MFA_Challenge; the **second factor** (TOTP) then creates the session. The first factor is provider-neutral behind a small provider abstraction so LOCAL and AD share one pipeline (see the Active Directory Authentication spec).
 
-Cookie flags: `HttpOnly`, `SameSite=Lax`, `Path=/`; `Secure` added only when `NODE_ENV==='production'` (Req 1.2, 1.3).
+- **First factor — LOCAL** (`auth.service.ts`) — `verifyLocalCredentials(db, email, password)` loads the user by email and runs `argon2.verify` against the stored hash, using a static dummy-hash verification for unknown/unusable accounts to keep timing uniform (anti-enumeration). Usable requires `is_active`, `auth_provider = 'LOCAL'`, and a non-null `password_hash` (Req 1.1, 1.13).
+- **First factor — AD** (`server/auth/ad/`, ad-authentication spec) — an LDAP bind + search + user-bind; on success the user is resolved by `external_id` or JIT-provisioned. Rejoins the same MFA-challenge step.
+- **Password hashing** (`password.service.ts`) — `hashPassword(raw)`, `verifyPassword(hash, raw)` using Argon2id (NFR Sec 1). LOCAL only.
+- **MFA / TOTP** (`mfa.service.ts`) — `otplib` generates the secret and verifies 6-digit codes; the secret is encrypted at rest with AES-256-GCM (`MFA_ENCRYPTION_KEY`). Enrollment stores a disabled device and marks it enabled only after the first code is confirmed. Up to `MFA_DEVICE_LIMIT` (2) devices per user (enforced in the service). Provider-agnostic — identical for LOCAL and AD (Req 1.4, 1.5).
+- **MFA_Challenge** (`utils/mfa-challenge.ts`) — a stateless HMAC-SHA256-signed cookie (`netops_mfa_challenge`, keyed by `SESSION_SECRET`) carrying `{ userId, purpose }` where purpose is `MFA_ENROLLMENT | MFA_LOGIN`; TTL `MFA_CHALLENGE_TTL_MINUTES`. `issueMfaChallenge(event, userId, purpose)` / `readMfaChallenge(event, expectedPurpose)` / `clearMfaChallenge(event)`.
+- **Session** (`session.service.ts`) — `createSession(db, event, userId)` mints a raw token (`base64url(randomBytes(32))`), stores only its `sha256` hash in `sessions.token_hash`, and sets the cookie; TTL `SESSION_TTL_HOURS`. `validateSession`, `revokeSession`, `revokeAllUserSessions`. Keyed on `userId` — provider-agnostic (Req 1.7).
+- **Session middleware** (`server/middleware/*.session.ts`) — reads the cookie, hashes it, looks up the session, checks expiry (expired → context stays unauthenticated so `requirePermission` yields 401, Req 1.10), resolves the user + effective permissions, refreshes `lastUsedAt`, and sets `event.context.auth = { user, permissions }`.
+- **Handlers** — `login.post.ts` (route provider, disabled-account gate, verify first factor, issue MFA_Challenge → `MFA_SETUP_REQUIRED | MFA_REQUIRED`, LOGIN_FAILED on failure — Req 1.1–1.3, 1.13, 1.14), `mfa/setup.post.ts` + `mfa/devices/*` (TOTP enrollment under an `MFA_ENROLLMENT` challenge — Req 1.4), `mfa/verify.post.ts` (verify TOTP under an `MFA_LOGIN` challenge → `createSession` → `AUTHENTICATED`, LOGIN_SUCCESS — Req 1.5, 1.15), `logout.post.ts` (invalidate — Req 1.11, LOGOUT audit), `me.get.ts` (identity + permissions — Req 1.12).
+
+Cookie flags (both `netops_session` and `netops_mfa_challenge`): `HttpOnly`, `SameSite=Lax`, `Path=/`; `Secure` added only when `NODE_ENV==='production'` (Req 1.7, 1.8).
 
 ### RBAC (`server/auth/permissions.ts`) — Req 2
 
@@ -662,7 +726,7 @@ Every protected handler calls `requirePermission` first (e.g. `requirePermission
 
 Each mutating service method opens one Drizzle transaction and writes both the mutation and its audit entry inside it. If the audit write throws, the transaction rolls back the mutation (Req 8.4, 8.5).
 
-- **AuthService** — `login(username, password, ctx)` → verify (Req 1.1), create session, write LOGIN_SUCCESS/LOGIN_FAILED; `logout(tokenHash, ctx)`; `me(user)`.
+- **AuthService** — first factor: `verifyLocalCredentials(db, email, password)` (LOCAL) or the AD provider (ad-authentication spec), then `issueMfaChallenge`; second factor: `verifyMfaLogin` → `createSession` + LOGIN_SUCCESS; `logout(tokenHash, ctx)` → invalidate + LOGOUT; `me(user)`. LOGIN_FAILED on a failed first/second factor (Req 1.1–1.15).
 - **UserService** — `list(query)`, `create(input, actor)` (+USER_CREATED, Req 3.8), `updateBasic(id, input, actor)` (+USER_UPDATED, Req 3.9), `changeRole(id, input, actor)` (+USER_ROLE_CHANGED, Req 3.4), `setStatus(id, active, actor)` (+USER_STATUS_CHANGED, Req 3.5), `resetPassword(id, input, actor)` (Argon2 hash, Req 3.6). All reads mapped through `UserResponseSchema` (Req 3.7). *Transaction boundary:* one tx per mutation wrapping the row change + audit insert.
 - **AclService** — `list`, `getById`, `create(input, actor)`, `update(id, input, actor)`, `remove(id, actor)`. On create/update it calls `AclCommandGenerator.generate(domain)` and stores the result in `generatedCommand` (Req 4.11). *Transaction boundary:* mutation + ACL_CREATED/UPDATED/DELETED audit in one tx (Req 4.13–4.15).
 - **RouteService** — mirror of AclService using `RouteCommandGenerator` (Req 6.8) and ROUTE_* audit entries in one tx (Req 6.10–6.12).
@@ -686,9 +750,12 @@ A default generic/Cisco-like implementation (`DefaultAclCommandGenerator`, `Defa
 
 | Method | Path | Permission | Request schema | Response |
 |--------|------|-----------|----------------|----------|
-| POST | `/api/auth/login` | none | `{username,password}` | `{user, permissions}` |
-| POST | `/api/auth/logout` | valid session | — | `{}` |
-| GET | `/api/auth/me` | valid session | — | `{user, permissions}` (Req 1.9) |
+| POST | `/api/auth/login` | none | `{email, password}` (LoginSchema) | `{status: MFA_SETUP_REQUIRED \| MFA_REQUIRED, challengeExpiresAt}` (Req 1.1–1.3) |
+| POST | `/api/auth/mfa/setup` | valid `MFA_ENROLLMENT` challenge | — | `{otpauthUri}` (Req 1.4) |
+| POST | `/api/auth/mfa/verify` | valid `MFA_LOGIN` challenge | `VerifyMfaSchema` `{code}` | `{status: AUTHENTICATED, user}` (Req 1.5) |
+| POST | `/api/auth/mfa/devices*` | valid session or `MFA_ENROLLMENT` challenge | `AddMfaDeviceSchema` / `VerifyMfaDeviceSchema` | device response (Req 1.4) |
+| POST | `/api/auth/logout` | valid session | — | `{}` (Req 1.11) |
+| GET | `/api/auth/me` | valid session | — | `{user, permissions}` (Req 1.12) |
 | GET | `/api/health` | none | — | `{status:"healthy"}` (Req 16.4) |
 | GET | `/api/users` | ADMINISTRATION_SHOW | `PaginationQuerySchema` | `Paginated<UserResponse>` (Req 3.1) |
 | POST | `/api/users` | ADMINISTRATION_MANAGE | `CreateUserSchema` | `UserResponse` (Req 3.2) |
@@ -810,7 +877,7 @@ sequenceDiagram
 | `UNAUTHENTICATED` | 401 | No/expired session on a protected endpoint (Req 2.5, 1.7) |
 | `FORBIDDEN` | 403 | Valid session, missing permission (Req 2.6) |
 | `NOT_FOUND` | 404 | Entity id not found |
-| `CONFLICT` | 409 | Unique constraint (e.g. duplicate username) |
+| `CONFLICT` | 409 | Unique constraint (e.g. duplicate email) |
 | `INTERNAL_ERROR` | 500 | Unexpected error; generic message only (Req 12.4) |
 
 Internal errors never leak SQL, stack traces, filesystem paths, or secrets to the client; full detail is logged server-side only (Req 12.4, 12.5, NFR Sec 5).
@@ -952,9 +1019,10 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 
 ### Security
 
-- **Passwords** stored only as Argon2 hashes (Req 1.1, NFR Sec 1).
-- **Sessions** store only the token hash; the raw token lives only in the cookie (Req 1.4, NFR Sec 2).
-- **Cookie flags**: `HttpOnly`, `SameSite=Lax`, `Path=/`, with `Secure` added when `NODE_ENV==='production'` (Req 1.2, 1.3).
+- **Passwords** for LOCAL accounts stored only as Argon2 hashes; AD accounts store no password (`password_hash` null) and are verified live against the directory every login (Req 1.16, NFR Sec 1).
+- **TOTP secrets** stored only encrypted (AES-256-GCM); never returned to the client except within the enrollment otpauth URI (NFR Sec 3).
+- **Sessions** store only the token hash; the raw token lives only in the cookie (Req 1.7, NFR Sec 2). A session is created only after the second factor succeeds.
+- **Cookie flags**: `HttpOnly`, `SameSite=Lax`, `Path=/`, with `Secure` added when `NODE_ENV==='production'` (Req 1.7, 1.8).
 - **Server-authoritative** auth/authorization (Req 2.8, NFR Sec 3); mass-assignment prevented by request schemas (Req 11.4, NFR Sec 4).
 - **Secret exclusion** from responses, audit entries, and the health endpoint (Req 8.3, 12.4, 16.5, NFR Sec 5).
 
@@ -968,7 +1036,7 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 
 - `db:generate` produces Drizzle migrations (Req 15.1).
 - `db:migrate` applies migrations explicitly (Req 15.2).
-- `db:seed` seeds roles `ADMIN`, `L2`, `NOC` and creates an initial admin from environment variables — credentials are never hardcoded (Req 15.3, 15.4, 15.5).
+- `db:seed` seeds roles `ADMINISTRATOR`, `L2_ENGINEER`, `NOC`, the permission catalog, and the role→permission mapping (RBAC spec), and in development creates an initial LOCAL admin from `SEED_USER_*` env — credentials never hardcoded (Req 15.3, 15.4, 15.5). In an AD-only production, the first administrator is set by assigning `ADMINISTRATOR` to a first-logged-in AD user directly in the database (Req 15.6, ad-authentication spec).
 
 ### Packaging (Req 16)
 

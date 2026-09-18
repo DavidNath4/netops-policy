@@ -24,6 +24,7 @@
     "@nuxt/ui": "4.11.1",
     "argon2": "0.45.1",
     "drizzle-orm": "0.45.2",
+    "ldapts": "9.2.0",
     "nuxt": "4.5.2",
     "otplib": "^13.5.0",
     "postgres": "3.4.9",
@@ -34,6 +35,7 @@
     "zod": "4.5.4"
   },
   "devDependencies": {
+    "@iconify-json/lucide": "^1.2.133",
     "@nuxt/eslint": "1.17.0",
     "@types/node": "24.13.3",
     "@types/qrcode": "^1.5.6",

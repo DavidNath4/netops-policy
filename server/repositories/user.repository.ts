@@ -30,6 +30,11 @@ export function findByEmail(db: Database, email: string): Promise<UserRow | unde
   return db.query.users.findFirst({ where: eq(users.email, email) })
 }
 
+/** Find an AD-provisioned user by its immutable directory id (objectGUID). */
+export function findByExternalId(db: Database, externalId: string): Promise<UserRow | undefined> {
+  return db.query.users.findFirst({ where: eq(users.externalId, externalId) })
+}
+
 export async function createLocalUser(db: Database, input: InsertLocalUser): Promise<UserRow> {
   const [row] = await db
     .insert(users)
@@ -47,6 +52,52 @@ export async function createLocalUser(db: Database, input: InsertLocalUser): Pro
   }
 
   return row
+}
+
+/** Columns required to just-in-time provision an AD user. Server-controlled only. */
+export interface InsertAdUser {
+  externalId: string
+  email: string
+  displayName: string
+}
+
+/**
+ * Create an AD-provisioned user (first login). No password is stored; the role
+ * is left null (common access) until an administrator assigns one.
+ */
+export async function createAdUser(db: Database, input: InsertAdUser): Promise<UserRow> {
+  const [row] = await db
+    .insert(users)
+    .values({
+      email: input.email,
+      displayName: input.displayName,
+      passwordHash: null,
+      authProvider: 'AD',
+      externalId: input.externalId,
+      // roleId left undefined → null (no feature permissions until assigned).
+    })
+    .returning()
+
+  if (!row) {
+    throw new Error('Failed to create AD user: no row returned from insert')
+  }
+
+  return row
+}
+
+/**
+ * Refresh mutable directory-sourced fields for a returning AD user. Never
+ * touches externalId, roleId, or isActive.
+ */
+export async function updateAdProfile(
+  db: Database,
+  userId: string,
+  input: { email: string, displayName: string },
+): Promise<void> {
+  await db
+    .update(users)
+    .set({ email: input.email, displayName: input.displayName, updatedAt: new Date() })
+    .where(eq(users.userId, userId))
 }
 
 export async function updateLastLogin(db: Database, userId: string): Promise<void> {

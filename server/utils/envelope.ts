@@ -24,6 +24,8 @@ export type ErrorCode =
   | 'FORBIDDEN_ORIGIN'
   | 'NOT_FOUND'
   | 'CONFLICT'
+  | 'AD_UNREACHABLE'
+  | 'ACCOUNT_DISABLED'
   | 'INTERNAL_ERROR'
 
 export interface OkEnvelope<T> {

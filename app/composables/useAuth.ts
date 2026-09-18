@@ -56,10 +56,10 @@ export function useAuth() {
   // Shared with auth.global middleware: whether the session was resolved once.
   const checked = useState<boolean>('auth:checked', () => false)
 
-  async function login(email: string, password: string): Promise<LoginStatus> {
+  async function login(identifier: string, password: string): Promise<LoginStatus> {
     const res = await $fetch<Envelope<{ status: LoginStatus, challengeExpiresAt: number }>>(
       '/api/auth/login',
-      { method: 'POST', body: { email, password } },
+      { method: 'POST', body: { identifier, password } },
     )
     challengeExpiresAt.value = res.data.challengeExpiresAt
     return res.data.status

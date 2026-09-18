@@ -15,6 +15,11 @@ import {
   generateTotpSecret,
   verifyTotp,
 } from './mfa.service'
+import {
+  AdAccountDisabledError,
+  AdCredentialsError,
+  authenticateAd,
+} from '../auth/ad/directory'
 
 /**
  * Authentication orchestration.
@@ -38,6 +43,23 @@ export class AuthError extends Error {
     this.name = 'AuthError'
   }
 }
+
+/**
+ * The NetOps account is deactivated (`is_active = false`). Distinct from a
+ * credential failure so the login endpoint can surface a clear "account
+ * disabled" message and (for AD) stop before contacting the directory.
+ */
+export class AccountDisabledError extends Error {
+  constructor(message = 'Account is disabled') {
+    super(message)
+    this.name = 'AccountDisabledError'
+  }
+}
+
+// Re-export the directory errors so endpoints can map them without importing the
+// provider module directly.
+export { AdAccountDisabledError, AdCredentialsError } from '../auth/ad/directory'
+export { DirectoryUnreachableError } from '../auth/ad/directory'
 
 /** Map a DB user row to the safe, client-facing shape. */
 export function toUserResponse(row: UserRow): UserResponse {
@@ -114,6 +136,74 @@ export async function verifyLocalCredentials(
 // unknown/unusable accounts; it can never match a user-supplied password.
 const DUMMY_HASH
   = '$argon2id$v=19$m=19456,t=2,p=1$c29tZS1zdGF0aWMtc2FsdA$RdescQjyPZWjY9d0Ck0m5xZ1oQ5rM6M8dQ0f7l0m5A'
+
+/**
+ * Verify an Active Directory login (first factor) and resolve it to a NetOps
+ * user, provisioning one just-in-time on first login.
+ *
+ * The password is always verified live against AD (an LDAP bind); NetOps never
+ * stores it. On success the user is recognized by its immutable directory id
+ * (objectGUID → external_id): an existing user is refreshed, a new one is
+ * created with no role (common access) until an administrator assigns one.
+ *
+ * Throws:
+ * - AdCredentialsError      → wrong/unknown/ambiguous credentials (→ generic 401)
+ * - AdAccountDisabledError  → account disabled in the directory (→ 403)
+ * - AccountDisabledError    → NetOps user exists but is_active = false (→ 403)
+ * - DirectoryUnreachableError → AD cannot be reached (→ 503)
+ */
+export async function verifyAdCredentials(
+  db: Database,
+  identifier: string,
+  password: string,
+): Promise<UserResponse> {
+  // Bind + search + user-bind against AD (throws on failure/unreachable).
+  const entry = await authenticateAd(identifier, password)
+
+  const externalId = entry.objectGuid
+  if (!externalId) {
+    // Without an immutable id we can't safely recognize the user. Treat as a
+    // credential failure rather than provisioning an unstable account.
+    throw new AdCredentialsError()
+  }
+
+  const email = pickAttr(entry.attributes, 'userPrincipalName')
+  const displayName = pickAttr(entry.attributes, 'displayName') ?? pickAttr(entry.attributes, 'cn')
+  if (!email || !displayName) {
+    throw new AdCredentialsError()
+  }
+
+  const existing = await userRepo.findByExternalId(db, externalId)
+  if (existing) {
+    // Returning AD user. Honor the NetOps disabled gate, then refresh + return.
+    if (!existing.isActive) {
+      throw new AccountDisabledError()
+    }
+    // Refresh mutable directory-sourced fields (never role/isActive/externalId).
+    if (existing.email !== email.toLowerCase() || existing.displayName !== displayName) {
+      await userRepo.updateAdProfile(db, existing.userId, {
+        email: email.toLowerCase(),
+        displayName,
+      })
+    }
+    return toUserResponse({ ...existing, email: email.toLowerCase(), displayName })
+  }
+
+  // First login → provision with no role (common access until assigned).
+  const created = await userRepo.createAdUser(db, {
+    externalId,
+    email: email.toLowerCase(),
+    displayName,
+  })
+  return toUserResponse(created)
+}
+
+/** Read a single-valued AD attribute (first element if multi-valued). */
+function pickAttr(attributes: Record<string, string | string[]>, key: string): string | undefined {
+  const raw = attributes[key]
+  const value = Array.isArray(raw) ? raw[0] : raw
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
 
 /**
  * Begin TOTP enrollment for a user: generate a secret, store it encrypted

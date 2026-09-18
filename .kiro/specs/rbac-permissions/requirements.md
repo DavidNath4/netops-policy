@@ -72,9 +72,11 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 
 1. THE Data_Layer SHALL add a nullable `role_id` column to the `users` table as a foreign key to `roles.role_id`.
 2. THE `users.role_id` foreign key SHALL use `ON DELETE RESTRICT`, so a role that is still assigned to any user cannot be deleted.
-3. THE Authorization_Service SHALL treat a user whose `role_id` is null as holding no feature Permissions.
+3. THE Authorization_Service SHALL treat a user whose `role_id` is null as holding no feature Permissions (common access: Dashboard and Log Trail only).
 4. WHEN an administrator changes a user's role, THE system SHALL set `users.role_id` to exactly one role.
 5. THE system SHALL support retiring a role by setting `roles.is_active = false` rather than deleting it while users are assigned.
+6. WHEN a user is provisioned from Active Directory on first login, THE system SHALL create the user with `role_id = null` and SHALL NOT assign any role automatically, so the AD user starts with common access until an administrator assigns a role (see the Active Directory Authentication spec).
+7. WHERE a deployment authenticates entirely through Active Directory, THE first administrator SHALL be established by an operator assigning the `ADMINISTRATOR` role to an already-provisioned AD user directly in the database (setting `users.role_id`), after that user has logged in at least once.
 
 ### Requirement 5: Permission resolution and enforcement
 
