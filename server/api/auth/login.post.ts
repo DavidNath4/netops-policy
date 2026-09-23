@@ -10,7 +10,7 @@ import {
   verifyAdCredentials,
   verifyLocalCredentials,
 } from '../../services/auth.service'
-import { findByEmail } from '../../repositories/user.repository'
+import { findByEmailOrUsername } from '../../repositories/user.repository'
 import { findByUserId as findMfaByUserId } from '../../repositories/user-mfa.repository'
 import { useDatabase } from '../../utils/db'
 import { assertSameOrigin } from '../../utils/auth'
@@ -50,8 +50,9 @@ export default defineEventHandler(async (event) => {
   const password = parsed.data.password
 
   // Resolve which provider verifies this attempt, based on any existing account.
-  // Email lookup is case-insensitive-safe because emails are stored lowercased.
-  const existing = await findByEmail(db, identifier.toLowerCase())
+  // Look up by email OR username (both stored lowercased) so a returning AD user
+  // is recognized whether they typed their email or their AD username.
+  const existing = await findByEmailOrUsername(db, identifier.toLowerCase())
 
   // Front-of-flow disabled gate: stop a deactivated NetOps account before any
   // credential verification (and, for AD, before contacting the directory).

@@ -108,6 +108,12 @@ export function buildTotpUri(secret: string, label: string): string {
  * boolean so callers don't have to reason about the delta window.
  */
 export async function verifyTotp(secret: string, code: string): Promise<boolean> {
-  const result = await verify({ secret, token: code })
+  // epochTolerance (seconds) accepts a code from the adjacent time steps, not
+  // just the exact current 30s window. Without it, a code entered near a window
+  // boundary — or with minor client/server clock skew — is rejected even though
+  // it's correct, then succeeds on a retry a moment later. ±30s (one window
+  // either side) is the standard 2FA tolerance and fixes that intermittent
+  // "wrong now, right on retry" behavior.
+  const result = await verify({ secret, token: code, epochTolerance: 30 })
   return result.valid
 }

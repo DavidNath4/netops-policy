@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm'
 import {
   boolean,
   index,
@@ -20,6 +21,9 @@ export const users = pgTable(
     userId: uuid('user_id').defaultRandom().primaryKey(),
     email: varchar('email', { length: 255 }).notNull(),
     displayName: varchar('display_name', { length: 150 }).notNull(),
+    // Directory username (AD sAMAccountName). Nullable: LOCAL accounts have none.
+    // An additional login identifier alongside email, not a replacement.
+    username: varchar('username', { length: 300 }),
     passwordHash: text('password_hash'),
     authProvider: authProviderEnum('auth_provider').notNull().default('LOCAL'),
     externalId: varchar('external_id', { length: 255 }),
@@ -34,6 +38,9 @@ export const users = pgTable(
   table => [
     uniqueIndex('users_email_uidx').on(table.email),
     uniqueIndex('users_external_id_uidx').on(table.externalId),
+    // Partial unique: usernames are unique among AD accounts; the many LOCAL
+    // rows with NULL username don't collide.
+    uniqueIndex('users_username_uidx').on(table.username).where(sql`${table.username} IS NOT NULL`),
     index('users_role_id_idx').on(table.roleId),
   ],
 )

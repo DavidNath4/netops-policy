@@ -22,6 +22,8 @@ const toast = useToast()
 
 const email = computed(() => user.value?.email ?? '—')
 const name = computed(() => user.value?.displayName ?? '—')
+// AD username (sAMAccountName). LOCAL accounts have none, so the row is hidden.
+const username = computed(() => user.value?.username ?? null)
 
 // Real role from the authenticated session (RBAC). Falls back gracefully.
 const role = computed(() => user.value?.roleName ?? user.value?.roleCode ?? '—')
@@ -148,6 +150,10 @@ async function onConfirmRemove() {
           <div class="flex items-center justify-between px-4 py-3">
             <dt class="text-[13px] font-medium text-muted">Email</dt>
             <dd class="text-[13px] font-semibold text-ink">{{ email }}</dd>
+          </div>
+          <div v-if="username" class="flex items-center justify-between px-4 py-3">
+            <dt class="text-[13px] font-medium text-muted">Username</dt>
+            <dd class="text-[13px] font-semibold text-ink">{{ username }}</dd>
           </div>
           <div class="flex items-center justify-between px-4 py-3">
             <dt class="text-[13px] font-medium text-muted">Name</dt>

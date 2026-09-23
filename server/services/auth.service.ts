@@ -67,6 +67,7 @@ export function toUserResponse(row: UserRow): UserResponse {
     userId: row.userId,
     email: row.email,
     displayName: row.displayName,
+    username: row.username,
     authProvider: row.authProvider,
     isActive: row.isActive,
     lastLoginAt: row.lastLoginAt,
@@ -172,6 +173,8 @@ export async function verifyAdCredentials(
   if (!email || !displayName) {
     throw new AdCredentialsError()
   }
+  // AD username (sAMAccountName). Stored lowercase for consistent lookup.
+  const username = pickAttr(entry.attributes, 'sAMAccountName')?.toLowerCase() ?? null
 
   const existing = await userRepo.findByExternalId(db, externalId)
   if (existing) {
@@ -180,13 +183,19 @@ export async function verifyAdCredentials(
       throw new AccountDisabledError()
     }
     // Refresh mutable directory-sourced fields (never role/isActive/externalId).
-    if (existing.email !== email.toLowerCase() || existing.displayName !== displayName) {
+    // Also backfills username on accounts provisioned before the column existed.
+    if (
+      existing.email !== email.toLowerCase()
+      || existing.displayName !== displayName
+      || existing.username !== username
+    ) {
       await userRepo.updateAdProfile(db, existing.userId, {
         email: email.toLowerCase(),
         displayName,
+        username,
       })
     }
-    return toUserResponse({ ...existing, email: email.toLowerCase(), displayName })
+    return toUserResponse({ ...existing, email: email.toLowerCase(), displayName, username })
   }
 
   // First login → provision with no role (common access until assigned).
@@ -194,6 +203,7 @@ export async function verifyAdCredentials(
     externalId,
     email: email.toLowerCase(),
     displayName,
+    username,
   })
   return toUserResponse(created)
 }

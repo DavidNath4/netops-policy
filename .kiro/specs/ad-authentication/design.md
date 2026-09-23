@@ -19,12 +19,12 @@ Design goals:
 
 ## Two-phase delivery
 
-This spec is intentionally split so implementation is directed and low-risk.
+This spec was intentionally split so implementation was directed and low-risk. **Both phases are complete.**
 
-- **Phase 1 — Discovery (temporary).** Build the connection, the Service_Account bind, and the user search. A real user logs in; the located directory entry is written to a local, git-ignored file. The team reads the file and decides the attribute mapping (which AD attribute is the immutable id, which is email, which is display name). The capture code is flag-gated (`AD_CAPTURE`), development-only, and **deleted** afterward (Req 9.5).
-- **Phase 2 — Integration.** With the mapping fixed, wire the AD bind into the Auth_Service: route the attempt, verify the password, JIT-provision or resolve the user by `external_id`, then issue the MFA challenge. Add audit entries and the disabled-account gate. Remove all Phase-1 capture scaffolding.
+- **Phase 1 — Discovery (done, then removed).** Built the connection, Service_Account bind, and user search; a real user logged in and the located entry was written to a local, git-ignored file. The team read it and fixed the attribute mapping (immutable id `objectGUID`, email `userPrincipalName`, display name `displayName`, username `sAMAccountName`). The flag-gated capture code was then **deleted** (Req 9.5).
+- **Phase 2 — Integration (done).** With the mapping fixed, the AD bind is wired into the Auth_Service: route the attempt, verify the password, JIT-provision or resolve the user by `external_id`, then issue the MFA challenge — plus the disabled-account gate (NetOps `is_active` and AD `ACCOUNTDISABLE`). A `username` column was added to `users` (via migration) so users can log in by AD username as well as email. All Phase-1 capture scaffolding was removed.
 
-The requirements hold for the integrated system; Phase 1 is the means to fix the one unknown (the attribute mapping) from real data rather than by guessing.
+The requirements describe the integrated system as it now stands; Phase 1 was the means to fix the one unknown (the attribute mapping) from real data rather than by guessing.
 
 ## Architecture
 
@@ -137,55 +137,53 @@ export interface DirectoryProvider {
 
 Never logs `AD_BIND_PASSWORD` or the user password (Req 1.6, NFR Sec 2). Performs no write operation (Req 2.2).
 
-### Identifier and search filter — Req 5 (Phase 1 exploratory, Phase 2 fixed)
+### Identifier and search filter — Req 5 (FINALIZED)
 
-The user types a single identifier at login. Because the definitive attribute is decided in Phase 1, the search uses a **broad, read-only filter** during discovery that matches the identifier against the common candidates, then is narrowed to the chosen attribute in Phase 2:
+By design the login identifier is flexible: a user may enter their AD **username** (`sAMAccountName`, e.g. `jdoe`) **or** their **email/UPN** (`jdoe@mov.co.id`). The directory search matches the supplied identifier against the common candidate attributes with a single read-only filter:
 
 ```
-# Phase 1 (discovery, read-only) — try common identifier attributes
 (&(objectClass=user)(|(sAMAccountName=<id>)(userPrincipalName=<id>)(mail=<id>)))
-
-# Phase 2 (fixed after mapping decided) — e.g. narrowed to the chosen attribute(s)
-(&(objectClass=user)(sAMAccountName=<id>))
 ```
 
 The identifier value is escaped per RFC 4515 before being placed in the filter (untrusted input, NFR Sec 4). If the filter matches more than one entry, the attempt is rejected as invalid credentials (Req 5.3) — the system never guesses among multiple matches.
 
-> The current `LoginSchema` requires a valid email. Supporting a non-email AD identifier (e.g. `sAMAccountName`) is a Phase-2 contract decision recorded here as open: either relax the login field to a general identifier or keep email/UPN. This is deferred until the Phase-1 capture shows what users actually present. Until then, discovery can proceed with whatever identifier the test user supplies.
+`LoginSchema` was relaxed from an email-only field to a general `identifier` string (min 1, max 255, no email-format constraint) so both forms are accepted. Provider routing and the provider itself decide validity: LOCAL looks the identifier up as an email; AD searches the directory. The login form field is labelled "Username or email".
 
-### Attribute mapping — Req 6.2 (decided in Phase 1, applied in Phase 2)
+### Attribute mapping — Req 6.2 (FINALIZED)
 
-The mapping from directory attributes to NetOps columns is the one unknown Phase 1 resolves. The intended shape (candidates, to be confirmed against the captured entry):
+Phase-1 discovery confirmed the directory shape against a real entry, and the mapping is now fixed in `resolveOrProvisionAdUser`:
 
-| NetOps column | Candidate AD attribute(s) | Notes |
+| NetOps column | AD attribute | Notes |
 |---|---|---|
-| `external_id` | `objectGUID` | Immutable; the recognition key for returning users (Req 6.4). Stored in a stable string form. |
-| `email` | `mail`, else `userPrincipalName` | Must satisfy the NetOps email constraint. |
+| `external_id` | `objectGUID` | Immutable; the recognition key for returning users (Req 6.4). Stored as the canonical GUID string (AD stores it mixed-endian; the provider formats it, e.g. `6c765573-d4e4-4d58-b4cc-465ebd6c41d2`). |
+| `email` | `userPrincipalName` | The captured directory has no `mail` attribute; UPN (e.g. `jdoe@mov.co.id`) is used and satisfies the NetOps email constraint. Stored lowercased. |
 | `display_name` | `displayName`, else `cn` | Human-friendly name. |
+| `username` | `sAMAccountName` | AD short username (e.g. `jdoe`). Stored lowercased. An additional login identifier alongside email (see Req 3), shown in the profile. Backfilled on the next login of accounts provisioned before this column existed. |
 | `auth_provider` | — | Constant `'AD'`. |
 | `password_hash` | — | Always `null` for AD (Req 5.5). |
 | `role_id` | — | Always `null` on provisioning (Req 6.1, 10.4). |
-
-The final mapping is fixed once the captured entry is reviewed, then encoded in `resolveOrProvisionAdUser`.
 
 ### Auth service changes (`server/services/auth.service.ts`) — Req 3, 4, 5, 6
 
 New/changed functions (LOCAL functions unchanged):
 
-- `resolveProvider(db, identifier)` — looks up an existing user by identifier; returns `'LOCAL'` or `'AD'` per Req 3.3–3.5, honoring `AUTH_LOCAL_ENABLED` / `AD_ENABLED` (Req 3.1, 3.2, 3.6, 3.7). Server-only (Req 3.8).
-- `assertNotDisabled(user)` — the front-of-flow gate: if an existing user is `is_active = false`, throw a distinct `AccountDisabledError` **before** any AD bind (Req 4.1–4.4).
-- `verifyAdCredentials(db, identifier, password)` — calls the DirectoryProvider, then `resolveOrProvisionAdUser`; returns the safe user shape (Req 5.2).
-- `resolveOrProvisionAdUser(db, entry)` — maps the entry, finds the user by `external_id`; if found, updates `last_login_at` (and mutable fields) and returns it; if not, inserts a new AD user with `role_id = null` (Req 6.1–6.5, 6.7).
+- `resolveProvider(existingProvider, env)` — decides the provider for an attempt. The login handler first looks up any existing account by email **or** username (`findByEmailOrUsername`); an existing `LOCAL` account routes to LOCAL (when `AUTH_LOCAL_ENABLED`), an existing `AD` account routes to AD (when `AD_ENABLED`), and an unknown identifier prefers AD when enabled, else LOCAL. Server-only (Req 3.1–3.8).
+- Front-of-flow gate: if the looked-up existing user is `is_active = false`, the handler returns `ACCOUNT_DISABLED` (403) **before** verifying credentials (Req 4.1–4.4). Because the lookup can miss when an AD user logs in by `sAMAccountName` (their stored identifier is the email), `verifyAdCredentials` re-checks `is_active` after the bind for that case.
+- `verifyAdCredentials(db, identifier, password)` — calls `authenticateAd`, then `resolveOrProvisionAdUser`; returns the safe user shape (Req 5.2).
+- `resolveOrProvisionAdUser(db, entry)` — maps the entry, finds the user by `external_id` (objectGUID); if found, honors the disabled gate, refreshes mutable fields (`email`, `display_name`, `username` — backfilling username where absent) and returns it; if not, inserts a new AD user with `role_id = null` (Req 6.1–6.7).
+
+The directory provider additionally rejects an account **disabled in AD** (the `ACCOUNTDISABLE` bit, `0x2`, of `userAccountControl`) with a distinct `AdAccountDisabledError` → 403, before the user bind. This is separate from the NetOps `is_active` gate (Req 4).
 
 ### Repository changes (`server/repositories/user.repository.ts`) — Req 6
 
 Add (LOCAL methods unchanged):
 
-- `findByExternalId(db, externalId)` — the returning-user lookup (Req 6.3, 6.4).
-- `createAdUser(db, { externalId, email, displayName })` — inserts with `authProvider: 'AD'`, `passwordHash: null`, `roleId: null` (Req 6.1, 6.2).
-- `updateAdProfile(db, userId, { displayName? })` + reuse of `updateLastLogin` for the returning path (Req 6.5).
+- `findByExternalId(db, externalId)` — the returning-user lookup by objectGUID (Req 6.3, 6.4).
+- `findByEmailOrUsername(db, identifier)` — login lookup for routing + the disabled gate, matching either stored identifier.
+- `createAdUser(db, { externalId, email, displayName, username })` — inserts with `authProvider: 'AD'`, `passwordHash: null`, `roleId: null` (Req 6.1, 6.2).
+- `updateAdProfile(db, userId, { email, displayName, username })` + reuse of `updateLastLogin` for the returning path (Req 6.5).
 
-No schema change is required — the `users` table already has `auth_provider`, `external_id` (unique), nullable `password_hash`, and nullable `role_id`. If Phase 1 reveals a need to store an additional immutable attribute, a migration will be generated via `db:generate` and applied by the operator via `db:migrate` (never automatically).
+**Schema change (applied via migration):** a nullable `username varchar(300)` column was added to `users`, with a **partial unique index** (`WHERE username IS NOT NULL`) so the many LOCAL rows with a null username don't collide. The migration was generated via `db:generate` and applied by the operator via `db:migrate` (never automatically). The rest of the `users` table was already AD-ready (`auth_provider`, unique `external_id`, nullable `password_hash`, nullable `role_id`).
 
 ### Endpoint impact — Req 7
 
@@ -209,13 +207,16 @@ Added to the existing Zod `EnvSchema` (`server/utils/config.ts`), validated at s
 | `AD_BIND_DN` | string (e.g. `mov\saconnect`); required when `AD_ENABLED` | Service_Account for search bind. |
 | `AD_BIND_PASSWORD` | string; required when `AD_ENABLED` | Service_Account password (operator fills manually). |
 | `AD_TIMEOUT_MS` | number, default e.g. `5000` | Bounded connect/operation timeout (Req 8.4). |
-| `AD_CAPTURE` | boolean, default `false` | **Temporary.** Phase-1 discovery capture; dev-only; removed after mapping (Req 9). |
+
+> `AD_CAPTURE` was a temporary Phase-1 discovery flag. Phase 1 is complete and the capture scaffolding (flag, capture module, discovery endpoint, and `.ad-capture/` folder) has been **removed** from the codebase (Req 9.5). It is retained in Req 9 below only as a record of the completed discovery step.
 
 Conditional validation: when `AD_ENABLED` is true, `AD_URL` / `AD_BASE_DN` / `AD_BIND_DN` / `AD_BIND_PASSWORD` must be present and non-empty, else startup halts (Req 1.2). When `AD_ENABLED` is false, they may be absent (Req 1.3). LDAPS/TLS is expressed purely by using an `ldaps://` URL in `AD_URL`, so production TLS needs config only, not code (NFR Sec 5).
 
-## Phase-1 capture design (temporary) — Req 9
+## Phase-1 capture design (temporary — COMPLETED & REMOVED) — Req 9
 
-The capture is deliberately small, isolated, and disposable.
+> Status: Phase 1 is done. The capture confirmed the attribute mapping (see the finalized mapping table above), and all capture scaffolding — the `AD_CAPTURE` flag, `server/auth/ad/capture.ts`, the `POST /api/auth/ad-capture` discovery endpoint, and the `.ad-capture/` folder + `.gitignore` entry — has been removed. The design below is kept as a record of how discovery worked.
+
+The capture was deliberately small, isolated, and disposable.
 
 - **Trigger.** Only when `AD_CAPTURE` is true **and** `NODE_ENV !== 'production'` (Req 9.1, 9.4).
 - **What is written.** The raw `DirectoryEntry.attributes` returned by the search — nothing else. The user's password is never in that object; any credential attribute (`unicodePwd`, `userPassword`, etc.) is redacted before writing (Req 9.2).
@@ -321,11 +322,9 @@ Testing uses Vitest, consistent with the main spec. AD directory calls are mocke
 
 Unchanged across specs: MFA design, session issuance, network validation, command generation, audit transactionality, packaging.
 
-## Migration & seeding (planned — not generated in this phase)
+## Migration & seeding
 
-Per the two-tier plan and the user's instruction, this documentation phase changes no code and generates no migration. When implementation is approved:
-
-1. No `users` schema change is expected (the table is already AD-ready). If Phase-1 discovery shows a need for an extra immutable directory attribute, a migration is generated via `db:generate` and applied only by the operator via `db:migrate`.
+1. One `users` schema change was applied: a nullable `username varchar(300)` column with a partial unique index (`WHERE username IS NOT NULL`), to store the AD `sAMAccountName`. The migration was generated via `db:generate` and applied by the operator via `db:migrate` (never automatically). The rest of the table was already AD-ready.
 2. No new seed data is required for AD; AD users are provisioned just-in-time on first login with `role_id = null`.
 3. The initial administrator for an AD-only deployment is set by the operator assigning the `ADMINISTRATOR` role to a first-logged-in AD user directly in the database.
 

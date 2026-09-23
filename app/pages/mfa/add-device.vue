@@ -149,20 +149,12 @@ function onCancel() {
 
           <form class="flex flex-col gap-4" novalidate @submit.prevent="onVerify">
             <FormField label="Verification code" name="code" :error="codeError" required>
-              <template #default="{ id, invalid, describedBy }">
-                <UInput
-                  :id="id"
+              <template #default="{ invalid }">
+                <MfaCodeInput
                   v-model="code"
-                  inputmode="numeric"
-                  autocomplete="one-time-code"
-                  maxlength="6"
-                  placeholder="123456"
-                  color="neutral"
-                  variant="outline"
-                  :aria-invalid="invalid"
-                  :aria-describedby="describedBy"
-                  class="w-full"
-                  :ui="{ base: 'bg-panel text-ink ring-line placeholder:text-muted' }"
+                  :disabled="submitting"
+                  :invalid="invalid"
+                  @complete="onVerify"
                 />
               </template>
             </FormField>

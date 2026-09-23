@@ -31,6 +31,8 @@ export const UserResponseSchema = z.object({
   userId: z.string().uuid(),
   email: z.string().email(),
   displayName: z.string(),
+  // AD username (sAMAccountName); null for LOCAL accounts.
+  username: z.string().nullable(),
   authProvider: z.enum(['LOCAL', 'AD']),
   isActive: z.boolean(),
   lastLoginAt: z.date().nullable(),

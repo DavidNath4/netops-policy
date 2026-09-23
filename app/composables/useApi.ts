@@ -33,6 +33,20 @@ import {
   mockDashboardSummary,
   mockRoutes,
 } from '~/utils/mock-data'
+import type { AclExecuteInput, AclPreviewInput, AclShowInput } from '#shared/schemas/acl.schema'
+import type { RouteExecuteInput, RoutePreviewInput, RouteShowInput } from '#shared/schemas/route.schema'
+import type { OperationResult } from '#shared/schemas/n8n.schema'
+import type { AuditResponse as RealAuditResponse } from '#shared/schemas/audit.schema'
+
+/** Audit-based dashboard summary shape (server: dashboard.service.ts). */
+interface AuditDashboardSummary {
+  totalExecutions: number
+  successCount: number
+  failedCount: number
+  perModule: { module: string, count: number }[]
+  recentActivities: RealAuditResponse[]
+  failedRecent: RealAuditResponse[]
+}
 
 // Small artificial latency so loading states are visible for the still-mock
 // resources (acl/routes/audit/dashboard).
@@ -146,6 +160,55 @@ export function useApi() {
       },
       remove(_id: string): Promise<void> {
         return resolve(undefined)
+      },
+    },
+
+    // REAL — dashboard + Log Trail from audit_logs. Kept separate from the mock
+    // `dashboard`/`audit` blocks above (whose shapes the current pages render)
+    // until those pages are reworked to the audit-based shapes.
+    dashboardReal: {
+      summary(): Promise<AuditDashboardSummary> {
+        return apiGet<AuditDashboardSummary>('/api/dashboard/summary')
+      },
+    },
+
+    auditReal: {
+      list(params?: Record<string, unknown>): Promise<Paginated<RealAuditResponse>> {
+        return apiGet<Paginated<RealAuditResponse>>('/api/audit', params)
+      },
+      get(id: string): Promise<RealAuditResponse> {
+        return apiGet<RealAuditResponse>(`/api/audit/${id}`)
+      },
+      export(params?: Record<string, unknown>): Promise<RealAuditResponse[]> {
+        return apiGet<RealAuditResponse[]>('/api/audit/export', params)
+      },
+    },
+
+    // REAL — ACL operations via n8n (show/preview/execute). The `acl` block
+    // above stays mock for the list/detail view until that page is reworked;
+    // these methods hit the live n8n-backed endpoints.
+    aclOps: {
+      show(input: AclShowInput): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/acl/show', 'POST', input)
+      },
+      preview(input: AclPreviewInput): Promise<{ preview: string, command: string[] }> {
+        return apiSend<{ preview: string, command: string[] }>('/api/acl/preview', 'POST', input)
+      },
+      execute(input: AclExecuteInput): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/acl/execute', 'POST', input)
+      },
+    },
+
+    // REAL — Route operations via n8n (show/preview/execute).
+    routeOps: {
+      show(input: RouteShowInput): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/routes/show', 'POST', input)
+      },
+      preview(input: RoutePreviewInput): Promise<{ preview: string, command: string[] }> {
+        return apiSend<{ preview: string, command: string[] }>('/api/routes/preview', 'POST', input)
+      },
+      execute(input: RouteExecuteInput): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/routes/execute', 'POST', input)
       },
     },
 

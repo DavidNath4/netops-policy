@@ -131,24 +131,26 @@ session cookie, open protected pages, survive a browser refresh, and log out.
 ### Phase 4 — Feature domains (LATER, NOT STARTED)
 
 These were described in the original plan and remain on mock data until built on
-top of the identity foundation. Kept here for traceability.
+top of the identity foundation. Kept here for traceability. The ACL/Route + n8n +
+audit feature has its own, current task list in the **n8n Integration** sub-spec
+(`.kiro/specs/n8n-integration/tasks.md`).
 
 - [ ] 19. Shared Zod validation for network primitives, ACL, route, user-admin, audit, pagination/envelope
-- [ ] 20. Database schema for feature domains: roles, user_roles, acl_policies, routes, audit_logs (+ enums, indexes) and their migration
+- [ ] 20. Database schema for feature domains and their migration
 - [ ] 21. RBAC: permissions, ROLE_PERMISSIONS, hasPermission, requirePermission, permission-gated sidebar
 - [ ] 22. API envelope error handling + central error handler (ZodError → VALIDATION_ERROR, AppError codes, generic INTERNAL_ERROR)
-- [ ] 23. Domain mappers, command generators (preview-only), repositories, services (User/Acl/Route/Audit/Dashboard) with per-mutation transactions + audit
-- [ ] 24. API handlers for users, ACL, routes, audit, dashboard, health
-- [ ] 25. Wire the mock feature pages (dashboard, ACL, routes, administration, logs) to live endpoints
-- [ ] 26. Security/audit integration + property tests
-- [ ] 27. Docker multi-stage image + README
-- [ ] 28. Final full-pipeline verification (typecheck, lint, test, build)
+- [ ] 23. Repositories, services, and handlers for the feature domains
+- [ ] 24. Wire the mock feature pages (dashboard, ACL, routes, administration, logs) to live endpoints
+- [ ] 25. Security/audit integration + property tests
+- [ ] 26. Docker multi-stage image + README
+- [ ] 27. Final full-pipeline verification (typecheck, lint, test, build)
 
 ## Notes
 
 - **Foundation-first:** Phase 2 completes the identity core end-to-end before any
   feature domain. RBAC/ACL/Route/Audit/AD are explicitly out of scope until their
-  phases.
+  phases. The current feature build (ACL/Route via n8n + audit) is tracked in
+  `.kiro/specs/n8n-integration/tasks.md`.
 - **Migrations & seed are generate/create-only in Phase 2.** The operator runs
   `npm run db:migrate` and `npm run db:seed` after review.
 - **Sessions store only `SHA-256(token)`.** The raw token lives only in the

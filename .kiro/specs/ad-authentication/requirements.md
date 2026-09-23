@@ -28,7 +28,8 @@ Scope of this spec:
 - **Service_Account**: The AD bind account (`AD_BIND_DN` / `AD_BIND_PASSWORD`) used to connect and search the directory; it never has its password stored by NetOps and is not an application user.
 - **User_Bind**: The verification step where the Directory_Provider re-binds to AD using the located user's Distinguished Name (DN) and the password supplied at login, proving the password is correct.
 - **JIT_Provisioning**: Creating a NetOps `users` row for an AD user on their first successful login, populated from directory attributes, with `auth_provider = 'AD'`, `password_hash = null`, and `role_id = null`.
-- **External_Id**: The immutable AD identifier stored in `users.external_id` (candidate: `objectGUID`), used to recognize a returning AD user regardless of email/name changes.
+- **External_Id**: The immutable AD identifier stored in `users.external_id` (`objectGUID`, formatted as a canonical GUID string), used to recognize a returning AD user regardless of email/name changes.
+- **Username**: The AD `sAMAccountName` (e.g. `jdoe`), stored lowercased in `users.username`. An additional login identifier alongside email, not a replacement.
 - **Auth_Provider**: The persisted origin of an account: `LOCAL` (email + Argon2 password) or `AD` (directory bind).
 - **Provider_Routing**: The server-side decision of which provider (LOCAL or AD) verifies a given login attempt, governed by environment configuration and the identifier.
 - **MFA_Challenge**: The existing short-lived, signed pre-auth cookie issued after a successful first factor, carrying the user id and a purpose (`MFA_ENROLLMENT | MFA_LOGIN`).
@@ -77,6 +78,7 @@ Scope of this spec:
 6. WHERE `AD_ENABLED` is false AND `AUTH_LOCAL_ENABLED` is true, THE Auth_Service SHALL behave exactly as the current LOCAL-only system.
 7. WHERE a production configuration sets `AUTH_LOCAL_ENABLED` to false, THE Auth_Service SHALL reject every LOCAL login attempt and SHALL authenticate only through AD.
 8. THE Auth_Service SHALL make the provider-routing decision on the server only, and SHALL NOT accept a client-supplied provider selection.
+9. THE Auth_Service SHALL accept a login identifier that is either an AD username (`sAMAccountName`) or an email/UPN, and SHALL resolve an existing account for routing by matching the identifier against the stored `email` or `username`.
 
 ### Requirement 4: Disabled account gate (front of flow)
 
@@ -101,6 +103,7 @@ Scope of this spec:
 4. IF the User_Bind fails because the password is wrong, THEN THE Auth_Service SHALL reject the attempt as invalid credentials.
 5. THE NetOps_Policy_Manager SHALL NOT persist any AD user's password or password hash; `users.password_hash` SHALL remain null for AD accounts.
 6. THE Directory_Provider SHALL verify the password against AD on every AD login and SHALL NOT rely on any previously stored value to skip the bind.
+7. IF the located directory entry is disabled in AD (the `ACCOUNTDISABLE` bit of `userAccountControl` is set), THEN THE Directory_Provider SHALL reject the attempt with a distinct account-disabled outcome (mapped to 403) before the User_Bind, independently of the NetOps `is_active` gate.
 
 ### Requirement 6: JIT provisioning on first AD login
 
@@ -109,10 +112,10 @@ Scope of this spec:
 #### Acceptance Criteria
 
 1. WHEN an AD User_Bind succeeds AND no NetOps user matches the entry's External_Id, THE Auth_Service SHALL create a new `users` row with `auth_provider = 'AD'`, `password_hash = null`, and `role_id = null`.
-2. THE Auth_Service SHALL populate the new AD user's `external_id`, `email`, and `display_name` from the directory entry according to the mapping fixed in Phase 2.
+2. THE Auth_Service SHALL populate the new AD user's `external_id` (from `objectGUID`), `email` (from `userPrincipalName`), `display_name` (from `displayName`, else `cn`), and `username` (from `sAMAccountName`) from the directory entry.
 3. WHEN an AD User_Bind succeeds AND a NetOps user already matches the entry's External_Id, THE Auth_Service SHALL use the existing user and SHALL NOT create a duplicate.
 4. THE Auth_Service SHALL recognize a returning AD user by `external_id` rather than by email or display name.
-5. WHEN a returning AD user logs in, THE Auth_Service SHALL update the user's `last_login_at`, and MAY refresh mutable directory-sourced fields (e.g. `display_name`) without changing `external_id`, `role_id`, or `is_active`.
+5. WHEN a returning AD user logs in, THE Auth_Service SHALL update the user's `last_login_at`, and MAY refresh mutable directory-sourced fields (`email`, `display_name`, `username` — backfilling `username` where it was previously absent) without changing `external_id`, `role_id`, or `is_active`.
 6. WHERE a newly provisioned AD user has `role_id = null`, THE Authorization_Service SHALL treat the user as holding no feature Permissions (common access: Dashboard and Log Trail only), consistent with the RBAC spec.
 7. THE Auth_Service SHALL perform JIT provisioning only after a successful User_Bind, and SHALL NOT create a user for a failed or ambiguous authentication.
 

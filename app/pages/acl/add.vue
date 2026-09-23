@@ -1,140 +1,122 @@
 <script setup lang="ts">
-// Add ACL Policy form with a live client-side "Generated Command" preview.
-// Mock-data only via useApi(); real endpoint is wired in task 13.2.
-// Requirements: 4.1, 4.2, 4.3, 4.11, 13.1, 13.2, 13.3, 13.4
-import type { AclAction, CreateAclInput, PolicyStatus, Protocol } from '~/utils/api-types'
+// Add ACL Policy — Generate (server preview, redacted) → Execute (via n8n) flow.
+// The command is previewed server-side (credentials shown only as ***), then on
+// explicit confirmation the field payload is sent to n8n. Requirements: 4.1,
+// 4.8, 4.9, 13.1–13.4, 13.12–13.15.
+import type { AclPreviewInput } from '#shared/schemas/acl.schema'
+import type { OperationResult } from '#shared/schemas/n8n.schema'
+import type { AclAction, Protocol } from '~/utils/api-types'
 
 definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_ADD' })
 
 const api = useApi()
 
-const protocolOptions: { label: string; value: Protocol }[] = [
+const protocolOptions: { label: string, value: Protocol }[] = [
   { label: 'TCP', value: 'TCP' },
   { label: 'UDP', value: 'UDP' },
   { label: 'ICMP', value: 'ICMP' },
   { label: 'ANY', value: 'ANY' },
 ]
-
-const actionOptions: { label: string; value: AclAction }[] = [
+const actionOptions: { label: string, value: AclAction }[] = [
   { label: 'ALLOW', value: 'ALLOW' },
   { label: 'DENY', value: 'DENY' },
 ]
-
-// Protocols that do not carry a port; the port field is disabled/cleared.
 const PORTLESS: Protocol[] = ['ICMP', 'ANY']
 
-interface AclForm {
-  name: string
-  source: string
-  destination: string
-  protocol: Protocol
-  port: number | undefined
-  action: AclAction
-  timeStart: string
-  timeEnd: string
-  changeTicket: string
-  description: string
-}
-
-const form = reactive<AclForm>({
+const form = reactive({
   name: '',
   source: '',
+  sourceMask: '',
   destination: '',
-  protocol: 'TCP',
-  port: undefined,
-  action: 'ALLOW',
-  timeStart: '',
-  timeEnd: '',
+  destinationMask: '',
+  protocol: 'TCP' as Protocol,
+  port: undefined as number | undefined,
+  action: 'ALLOW' as AclAction,
+  timeRange: '',
   changeTicket: '',
   description: '',
+  execUsername: '',
+  execPassword: '',
 })
 
 const portDisabled = computed(() => PORTLESS.includes(form.protocol))
-
-// Clear the port whenever the protocol becomes portless (ICMP/ANY).
-watch(
-  () => form.protocol,
-  (proto) => {
-    if (PORTLESS.includes(proto)) form.port = undefined
-  },
-)
-
-// --- Live client-side command preview (UX only) ---------------------------
-// NOTE: This preview is client-side ONLY, for immediate feedback while typing.
-// Per Req 4.11 the real `generatedCommand` is authoritative and produced by the
-// server; the API returns it on create (wired in task 13.2). We never submit
-// this string — it is display-only.
-const commandPreview = computed(() => {
-  const name = form.name.trim() || '<name>'
-  const verb = form.action === 'ALLOW' ? 'permit' : 'deny'
-  const proto = form.protocol.toLowerCase()
-  const source = form.source.trim() || '<source>'
-  const destination = form.destination.trim() || '<destination>'
-  let cmd = `access-list ${name} ${verb} ${proto} ${source} host ${destination}`
-  if (!portDisabled.value && form.port != null) cmd += ` eq ${form.port}`
-  if (form.timeStart && form.timeEnd) {
-    cmd += `\ntime-range ${form.timeStart} to ${form.timeEnd}`
-  }
-  return cmd
+watch(() => form.protocol, (p) => {
+  if (PORTLESS.includes(p)) form.port = undefined
 })
 
-// --- Validation ------------------------------------------------------------
-const errors = reactive<Record<string, string>>({})
-
-function validate(): boolean {
-  for (const k of Object.keys(errors)) delete errors[k]
-
-  if (!form.name.trim()) errors.name = 'Name is required.'
-  if (!form.source.trim()) errors.source = 'Source is required.'
-  if (!form.destination.trim()) errors.destination = 'Destination is required.'
-
-  if (portDisabled.value) {
-    // ICMP/ANY must not carry a port.
-    if (form.port != null) errors.port = 'Port must be empty for ICMP/ANY.'
-  }
-  else {
-    // TCP/UDP require a valid port.
-    if (form.port == null) errors.port = 'Port is required for TCP/UDP.'
-    else if (form.port < 1 || form.port > 65535) errors.port = 'Port must be between 1 and 65535.'
-  }
-
-  return Object.keys(errors).length === 0
+// Build the field payload for preview/execute (ADD).
+function buildPayload(): AclPreviewInput {
+  return {
+    operation: 'ADD',
+    name: form.name.trim(),
+    source: form.source.trim(),
+    sourceMask: form.sourceMask.trim() || undefined,
+    destination: form.destination.trim(),
+    destinationMask: form.destinationMask.trim() || undefined,
+    protocol: form.protocol,
+    port: portDisabled.value ? undefined : form.port,
+    action: form.action,
+    timeRange: form.timeRange.trim() || undefined,
+    changeTicket: form.changeTicket.trim() || undefined,
+    description: form.description.trim() || undefined,
+    execUsername: form.execUsername,
+    execPassword: form.execPassword,
+  } as AclPreviewInput
 }
 
-const submitting = ref(false)
-const submitError = ref<string | null>(null)
+const preview = ref<string | null>(null)
+const generating = ref(false)
+const executing = ref(false)
+const confirmOpen = ref(false)
+const errorMsg = ref<string | null>(null)
+const result = ref<OperationResult | null>(null)
 
-async function onSubmit() {
-  submitError.value = null
-  if (!validate()) return
+function toMessage(e: unknown, fallback: string): string {
+  if (e && typeof e === 'object' && 'data' in e) {
+    const data = (e as { data?: { error?: { message?: string } } }).data
+    if (data?.error?.message) return data.error.message
+  }
+  return e instanceof Error ? e.message : fallback
+}
 
-  submitting.value = true
+// Invalidate a stale preview whenever the form changes.
+watch(form, () => {
+  preview.value = null
+  result.value = null
+})
+
+async function onGenerate() {
+  errorMsg.value = null
+  result.value = null
+  generating.value = true
   try {
-    const input: CreateAclInput = {
-      name: form.name.trim(),
-      source: form.source.trim(),
-      destination: form.destination.trim(),
-      protocol: form.protocol,
-      port: portDisabled.value ? undefined : form.port,
-      action: form.action,
-      timeStart: form.timeStart || undefined,
-      timeEnd: form.timeEnd || undefined,
-      changeTicket: form.changeTicket.trim() || undefined,
-      description: form.description.trim() || undefined,
-      status: 'DRAFT' as PolicyStatus,
-    }
-    await api.acl.create(input)
-    await navigateTo('/acl')
+    const { preview: text } = await api.aclOps.preview(buildPayload())
+    preview.value = text
   }
   catch (e) {
-    submitError.value = e instanceof Error ? e.message : 'Failed to create ACL policy.'
+    errorMsg.value = toMessage(e, 'Failed to generate the command preview.')
   }
   finally {
-    submitting.value = false
+    generating.value = false
   }
 }
 
-// Shared input classes (white input, border-line, rounded-6px).
+async function onExecuteConfirmed() {
+  errorMsg.value = null
+  executing.value = true
+  try {
+    result.value = await api.aclOps.execute(buildPayload())
+    confirmOpen.value = false
+  }
+  catch (e) {
+    confirmOpen.value = false
+    errorMsg.value = toMessage(e, 'Execution failed.')
+  }
+  finally {
+    executing.value = false
+  }
+}
+
 const inputClass
   = 'h-[38px] w-full rounded-md border border-line bg-panel px-3 text-xs text-ink outline-none focus:border-brand disabled:cursor-not-allowed disabled:bg-surface disabled:text-muted'
 </script>
@@ -143,7 +125,7 @@ const inputClass
   <div class="flex flex-col gap-6">
     <PageHeader
       title="Add ACL Policy"
-      description="Create an access rule and preview the generated command."
+      description="Fill the fields, generate the command, then execute via automation."
     >
       <template #actions>
         <NuxtLink
@@ -157,70 +139,55 @@ const inputClass
     </PageHeader>
 
     <UAlert
-      v-if="submitError"
+      v-if="errorMsg"
       color="error"
       variant="soft"
       icon="i-lucide-circle-alert"
-      :description="submitError"
+      :description="errorMsg"
     />
 
-    <form class="flex flex-col gap-6" @submit.prevent="onSubmit">
-      <!-- 2-column field grid -->
+    <form class="flex flex-col gap-6" @submit.prevent="onGenerate">
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <FormField label="Name" name="name" :error="errors.name" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.name"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. allow-web"
-              :class="inputClass"
-            >
-          </template>
-        </FormField>
-
-        <FormField label="Source IP" name="source" :error="errors.source" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.source"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. 192.168.1.0/24"
-              :class="inputClass"
-            >
-          </template>
-        </FormField>
-
-        <FormField label="Destination IP" name="destination" :error="errors.destination" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.destination"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. 10.0.0.0/24"
-              :class="inputClass"
-            >
+        <FormField label="Name" name="name" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.name" type="text" placeholder="e.g. KSEI-JMP" :class="inputClass">
           </template>
         </FormField>
 
         <FormField label="Protocol" name="protocol" required>
           <template #default="{ id }">
             <select :id="id" v-model="form.protocol" :class="inputClass">
-              <option v-for="opt in protocolOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </option>
+              <option v-for="opt in protocolOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </template>
         </FormField>
 
-        <FormField label="Port" name="port" :error="errors.port">
-          <template #default="{ id, invalid, describedBy }">
+        <FormField label="Source" name="source" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.source" type="text" placeholder="e.g. 10.100.100.100" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Source Mask" name="sourceMask">
+          <template #default="{ id }">
+            <input :id="id" v-model="form.sourceMask" type="text" placeholder="e.g. 255.255.255.255" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Destination" name="destination" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.destination" type="text" placeholder="e.g. 10.200.200.200" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Destination Mask" name="destinationMask">
+          <template #default="{ id }">
+            <input :id="id" v-model="form.destinationMask" type="text" placeholder="e.g. 255.255.255.255" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Port" name="port">
+          <template #default="{ id }">
             <input
               :id="id"
               v-model.number="form.port"
@@ -228,8 +195,6 @@ const inputClass
               min="1"
               max="65535"
               :disabled="portDisabled"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
               placeholder="e.g. 443"
               :class="inputClass"
             >
@@ -239,77 +204,98 @@ const inputClass
         <FormField label="Action" name="action" required>
           <template #default="{ id }">
             <select :id="id" v-model="form.action" :class="inputClass">
-              <option v-for="opt in actionOptions" :key="opt.value" :value="opt.value">
-                {{ opt.label }}
-              </option>
+              <option v-for="opt in actionOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
             </select>
           </template>
         </FormField>
 
-        <FormField label="Start Time" name="timeStart">
+        <FormField label="Time Range" name="timeRange">
           <template #default="{ id }">
-            <input :id="id" v-model="form.timeStart" type="time" :class="inputClass">
-          </template>
-        </FormField>
-
-        <FormField label="End Time" name="timeEnd">
-          <template #default="{ id }">
-            <input :id="id" v-model="form.timeEnd" type="time" :class="inputClass">
+            <input :id="id" v-model="form.timeRange" type="text" placeholder="e.g. 31-May-26" :class="inputClass">
           </template>
         </FormField>
 
         <FormField label="Ticket Change" name="changeTicket">
           <template #default="{ id }">
-            <input
-              :id="id"
-              v-model="form.changeTicket"
-              type="text"
-              placeholder="e.g. CHG-00123"
-              :class="inputClass"
-            >
+            <input :id="id" v-model="form.changeTicket" type="text" placeholder="e.g. CHG-123456" :class="inputClass">
           </template>
         </FormField>
 
         <FormField label="Description" name="description" class="sm:col-span-2">
           <template #default="{ id }">
-            <textarea
-              :id="id"
-              v-model="form.description"
-              rows="3"
-              placeholder="Optional notes about this policy"
-              :class="inputClass"
-              class="!h-auto py-2"
-            />
+            <textarea :id="id" v-model="form.description" rows="2" placeholder="Optional notes" :class="inputClass" class="!h-auto py-2" />
           </template>
         </FormField>
       </div>
 
-      <!-- Generated Command terminal -->
+      <!-- Execution credentials (forwarded to automation; never stored). -->
+      <div class="rounded-lg border border-line bg-panel p-4">
+        <h2 class="mb-3 text-sm font-semibold text-ink">Execution Credentials</h2>
+        <p class="mb-3 text-[11px] text-muted">
+          Your device login, used only to run this command. Shown as *** in the preview and never stored.
+        </p>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <FormField label="Username" name="execUsername" required>
+            <template #default="{ id }">
+              <input :id="id" v-model="form.execUsername" type="text" autocomplete="off" :class="inputClass">
+            </template>
+          </FormField>
+          <FormField label="Password" name="execPassword" required>
+            <template #default="{ id }">
+              <input :id="id" v-model="form.execPassword" type="password" autocomplete="off" :class="inputClass">
+            </template>
+          </FormField>
+        </div>
+      </div>
+
+      <!-- Generated command preview + primary action -->
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold text-ink">Generated Command</h2>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre class="whitespace-pre-wrap break-all">{{ commandPreview }}</pre>
+          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
         </div>
-        <!-- Req 4.11: the authoritative command is generated by the server on save. -->
-        <p class="text-[10px] text-muted">
-          Preview only. The authoritative command is generated by the server on save.
-        </p>
-      </div>
 
-      <div class="flex justify-end">
-        <button
-          type="submit"
-          :disabled="submitting"
-          class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
-        >
-          <UIcon
-            :name="submitting ? 'i-lucide-loader-circle' : 'i-lucide-check'"
-            class="size-4"
-            :class="{ 'animate-spin': submitting }"
-          />
-          Validate &amp; Add Policy
-        </button>
+        <div v-if="result" class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+          <p :class="result.status === 'SUCCESS' ? 'text-ok' : 'text-bad'">
+            {{ result.status === 'SUCCESS' ? '✓ Execution succeeded' : '✗ Execution failed' }}
+          </p>
+          <pre v-if="result.output" class="mt-1 whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
+          <pre v-else-if="result.error" class="mt-1 whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button
+            v-if="!preview"
+            type="submit"
+            :disabled="generating"
+            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
+          >
+            <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />
+            Generate
+          </button>
+          <button
+            v-else
+            type="button"
+            :disabled="executing"
+            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
+            @click="confirmOpen = true"
+          >
+            <UIcon name="i-lucide-play" class="size-4" />
+            Execute Command
+          </button>
+        </div>
       </div>
     </form>
+
+    <ConfirmDialog
+      v-model="confirmOpen"
+      title="Execute ACL command?"
+      message="This will run the previewed command on the target device via automation. This action changes device configuration."
+      confirm-label="Execute"
+      confirm-color="primary"
+      :loading="executing"
+      @confirm="onExecuteConfirmed"
+    />
   </div>
 </template>

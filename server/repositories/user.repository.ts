@@ -35,6 +35,17 @@ export function findByExternalId(db: Database, externalId: string): Promise<User
   return db.query.users.findFirst({ where: eq(users.externalId, externalId) })
 }
 
+/**
+ * Find a user by email OR username (both stored lowercased). Used at login to
+ * resolve an existing account for provider routing and the disabled gate,
+ * regardless of whether the user typed their email or their AD username.
+ */
+export function findByEmailOrUsername(db: Database, identifier: string): Promise<UserRow | undefined> {
+  return db.query.users.findFirst({
+    where: or(eq(users.email, identifier), eq(users.username, identifier)),
+  })
+}
+
 export async function createLocalUser(db: Database, input: InsertLocalUser): Promise<UserRow> {
   const [row] = await db
     .insert(users)
@@ -59,6 +70,7 @@ export interface InsertAdUser {
   externalId: string
   email: string
   displayName: string
+  username: string | null
 }
 
 /**
@@ -71,6 +83,7 @@ export async function createAdUser(db: Database, input: InsertAdUser): Promise<U
     .values({
       email: input.email,
       displayName: input.displayName,
+      username: input.username,
       passwordHash: null,
       authProvider: 'AD',
       externalId: input.externalId,
@@ -92,11 +105,16 @@ export async function createAdUser(db: Database, input: InsertAdUser): Promise<U
 export async function updateAdProfile(
   db: Database,
   userId: string,
-  input: { email: string, displayName: string },
+  input: { email: string, displayName: string, username: string | null },
 ): Promise<void> {
   await db
     .update(users)
-    .set({ email: input.email, displayName: input.displayName, updatedAt: new Date() })
+    .set({
+      email: input.email,
+      displayName: input.displayName,
+      username: input.username,
+      updatedAt: new Date(),
+    })
     .where(eq(users.userId, userId))
 }
 

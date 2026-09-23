@@ -51,6 +51,21 @@ export const EnvSchema = z.object({
     .int()
     .positive('AD_TIMEOUT_MS must be a positive integer')
     .default(5000),
+
+  // -------------------------------------------------------------------------
+  // n8n integration (ACL/route execution). See .kiro/specs/n8n-integration.
+  // The app forwards field payloads to n8n over an authenticated webhook; n8n
+  // composes and runs the device command via the SSH jump host. The API key is
+  // server-only and must never be exposed via runtimeConfig.public.
+  // -------------------------------------------------------------------------
+  N8N_BASE_URL: z.string().url('N8N_BASE_URL must be a valid URL'),
+  N8N_API_KEY: z.string().min(1, 'N8N_API_KEY is required'),
+  // Bounded per-call timeout so an unresponsive n8n fails fast.
+  N8N_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive('N8N_TIMEOUT_MS must be a positive integer')
+    .default(15000),
 })
   .refine(
     env => !env.AD_ENABLED || (env.AD_URL && env.AD_BASE_DN && env.AD_BIND_DN && env.AD_BIND_PASSWORD),

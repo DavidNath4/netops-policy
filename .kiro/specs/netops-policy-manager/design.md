@@ -2,18 +2,21 @@
 
 ## Overview
 
-NetOps Policy Manager is a single fullstack Nuxt 3 application that lets authenticated, role-scoped operators author and review network ACL and route policies, generate vendor-agnostic device command previews, and audit every significant action. It never pushes configuration to devices and never provisions its own database.
+NetOps Policy Manager is a single fullstack Nuxt 4 application that gives authenticated, role-scoped operators an interface to run ACL and route operations (show/add/delete) and an immutable audit trail of every one of them. It does not execute anything against network devices itself and does not store network device configuration: execution is delegated to an external **n8n** workflow (behind an SSH jump host), and this application's PostgreSQL database is an **audit/logging layer, not the source of truth** for ACL/route state.
 
-The application is delivered as one Nuxt app running on the Nitro server. Vue 3 renders the frontend; Nitro hosts the `/api` endpoints. All authentication, authorization, validation, business logic, and persistence run on the server. PostgreSQL (accessed through Drizzle ORM) is the only datastore. The whole thing ships as a single multi-stage Docker image.
+The application is delivered as one Nuxt app running on the Nitro server. Vue 3 renders the frontend; Nitro hosts the `/api` endpoints. All authentication, authorization, validation, redaction, n8n orchestration, and audit persistence run on the server. PostgreSQL (accessed through Drizzle ORM) is the only local datastore and holds identity, RBAC, sessions, and audit logs. The whole thing ships as a single multi-stage Docker image.
 
-This design maps directly to the requirements in `requirements.md`; requirement numbers are referenced inline where a design decision satisfies a specific acceptance criterion.
+For add/delete operations the app shows a **redacted command preview** (built from a static template + the operator's field values) so the engineer can review what will happen, then — on explicit confirmation — forwards the **field payload** (not the rendered command) to n8n over an authenticated webhook, waits for the result, and records it. A single **correlation id** links the whole chain (Web App request → n8n execution → device command → device response).
+
+This design maps directly to the requirements in `requirements.md`; requirement numbers are referenced inline where a design decision satisfies a specific acceptance criterion. The n8n webhook contract, payloads, API-key auth, and command templates are detailed in the **n8n Integration** spec (`.kiro/specs/n8n-integration/`).
 
 ### Design Goals
 
-- **Server-authoritative security** — every auth/authorization/validation check runs server-side, independent of the frontend (Req 2.8, NFR Security 3).
-- **Strict model layering** — DB rows never reach the client; Zod schemas are the single source of application types (Req 11).
-- **Preview-only command generation** — vendor syntax is isolated behind swappable abstractions and never executed (Req 7).
-- **Auditability** — mutations and their audit entries commit atomically in one transaction (Req 8.4, 8.5).
+- **Server-authoritative security** — every auth/authorization/validation/redaction step runs server-side, independent of the frontend (Req 2.8, NFR Security 4).
+- **Interface + audit system of record** — the app captures intent and outcome; device state lives on devices, reached only through n8n. The DB stores audit logs, not ACL/route rows (Req 8, Req 10).
+- **Delegated execution** — the app never opens a device session; it forwards field payloads to n8n and records the result (Req 7).
+- **Credential safety** — the per-engineer Execution_Credentials are forwarded to n8n but never persisted and never shown; they appear only as `***` in previews, responses, and audit (Req 7, NFR Security 7).
+- **End-to-end traceability** — one correlation id ties request → n8n → device command → response together on the audit log (Req 8.5).
 - **Explicit, safe deployment** — no DB provisioning, no auto-migrate, no embedded fallback, validated env at startup (Req 14).
 
 ## Architecture
@@ -26,13 +29,16 @@ Browser (Vue 3 SPA/SSR)
    ▼
 Nuxt app (Nitro server)
    ├── Vue frontend (pages, components, composables)
-   └── Nitro backend (/api handlers → services → repositories)
-                                  │
-                                  ▼
-                            PostgreSQL (via Drizzle)
+   └── Nitro backend (/api handlers → services → { repositories | N8N_Client })
+             │                                        │
+             ▼                                        ▼
+     PostgreSQL (via Drizzle)                 n8n webhook (HTTPS + API key)
+     identity/RBAC/sessions/audit                     │
+                                                       ▼
+                                              SSH jump host → device
 ```
 
-There is exactly one deployable unit. The browser talks only to the Nuxt app; the Nuxt app talks only to PostgreSQL.
+There is one deployable unit for this app. The browser talks only to the Nuxt app. The Nuxt app talks to PostgreSQL (for identity, RBAC, sessions, and audit) and to n8n (for ACL/route execution). It never talks to a device directly — n8n owns the SSH jump host and the device credentials.
 
 ### Layering
 
@@ -44,51 +50,61 @@ flowchart TD
     B --> C[Zod Validation<br/>API Request schema]
     C --> D[Authentication<br/>session middleware]
     D --> E[Authorization<br/>requirePermission]
-    E --> F[Service<br/>business logic + tx]
-    F --> G[Repository<br/>persistence]
+    E --> F[Service<br/>business logic + orchestration]
+    F -->|identity/RBAC/audit| G[Repository]
     G --> H[Drizzle ORM<br/>parameterized queries]
     H --> I[(PostgreSQL)]
+    F -->|ACL/route execution| N[N8N_Client]
+    N -->|HTTPS + API key + correlationId| K[n8n webhook]
+    K --> L[SSH jump host → device]
+    F -->|records outcome| G
     F -->|maps via explicit mapper| J[API Response schema]
     J --> B
     B -->|API Envelope| A
 ```
+
+For ACL/route operations the service is an **orchestrator**, not a persistence writer: it validates, builds the redacted preview (add/delete), calls `N8N_Client` with the field payload + correlation id, then writes one audit log capturing the request, the redacted command snapshot, the n8n execution metadata, and the device response. There is no ACL/route table to write to.
 
 Ordering note: the session middleware (Authentication) runs globally and populates `event.context.auth` before handlers execute, so in the handler body the effective order is validate input → `requirePermission` → service. Authentication is resolved earlier in the middleware chain (Req 2.5, 2.6).
 
 Responsibilities:
 
 - **API Handler (thin)** — parse request, delegate, wrap the result in the API Envelope. No business logic. (Req 12.1, 12.2)
-- **Zod Validation** — parse the request body/query with an explicit API Request schema that excludes Server_Controlled_Fields. (Req 11.4, 13.5)
+- **Zod Validation** — parse the request body/query with an explicit API Request schema that excludes server-controlled fields (`id`, `correlationId`, `created_at`, audit `status`). (Req 11.4, 13.5)
 - **Authentication** — session middleware resolves the current user + permissions from the session cookie, or leaves the context unauthenticated. (Req 1, Req 2.5)
 - **Authorization** — `requirePermission(event, perm)` throws 401 if unauthenticated, 403 if the user lacks the permission. (Req 2.6)
-- **Service** — business logic; owns transaction boundaries; calls command generators; writes the audit entry in the same transaction as the mutation. (Req 8.4)
-- **Repository** — the only layer that knows Drizzle; exposes typed methods returning domain models. (Req 10.7)
-- **Drizzle → PostgreSQL** — parameterized queries only. (Req 10.7)
+- **Service** — business logic. For identity/user mutations it owns the DB transaction (row change + audit entry in one tx, Req 8.4). For ACL/route it orchestrates: validate → redact/preview → call `N8N_Client` with the field payload + correlationId → record one audit log (SUCCESS/FAILED). It never composes or runs a device command itself. (Req 4, 6, 7)
+- **N8N_Client** (`server/network/`) — the only layer that calls n8n; POSTs the field payload with the API key + correlationId and normalizes the result. (Req 7.4, 7.5)
+- **Repository** — the only layer that knows Drizzle; exposes typed methods returning domain models. There are no ACL/route repositories. (Req 10.8)
+- **Drizzle → PostgreSQL** — parameterized queries only. (Req 10.8)
 
 ### Model Separation
 
-Five distinct model layers, all derived from Zod schemas via `z.infer` (Req 11.1, 11.2). Explicit mapper functions convert between adjacent layers. **DB rows are never returned to the frontend** (Req 11.3).
+Model layers are all derived from Zod schemas via `z.infer` (Req 11.1, 11.2). Explicit mapper functions convert between adjacent layers. **DB rows are never returned to the frontend** (Req 11.3).
+
+For identity/RBAC/audit (the parts this app persists), the layering is unchanged from a normal DB app:
 
 | Layer | Origin | Purpose | Crosses to client? |
 |-------|--------|---------|--------------------|
-| DB model | Drizzle table `$inferSelect` | Exact row shape | No |
+| DB model | Drizzle table `$inferSelect` | Exact row shape (users, sessions, audit_logs, …) | No |
 | Domain model | Zod domain schema | Business objects used inside services | No |
-| API Request model | Zod request schema | Accepted mutation input, excludes Server_Controlled_Fields | Inbound only |
+| API Request model | Zod request schema | Accepted input, excludes server-controlled fields | Inbound only |
 | API Response model | Zod response schema | Safe outbound shape, excludes secrets | Yes |
 | UI Form model | Zod form schema (shared) | Frontend form state + client validation | Client-side |
 
-Mapper direction:
+For ACL/route operations there is **no DB model** — the app does not store ACL/route rows. Instead the flow is:
 
 ```
-DB row ──dbToDomain──▶ Domain ──domainToResponse──▶ API Response ──▶ client
-client ──▶ API Request ──requestToDomain(+ server fields)──▶ Domain ──domainToDbInsert──▶ DB row
+UI Form ──▶ API Request (field payload) ──validate/redact──▶ N8N field payload ──▶ n8n
+n8n response ──▶ Operation Result (Zod) ──▶ client
+                  └──▶ Audit_Log (request/command/execution/response JSONB) ──▶ PostgreSQL
 ```
 
-Server_Controlled_Fields (`id`, `generatedCommand`, `createdBy`, `createdAt`, `updatedBy`, `updatedAt`) are never present on API Request schemas, so a client cannot set them (Req 4.12, 6.9, 11.4). The server sets them during `requestToDomain` / insert.
+Server-controlled fields (`id`, `correlation_id`, `created_at`, and the audit `status`) are never present on API Request schemas, so a client cannot set them (Req 11.4); the server sets them. The Command_Preview string is produced by the server and returned for display only — it is not part of the request the client can spoof, and it is not sent to n8n.
 
 ## Project Structure
 
-Nuxt 3 convention: application (client + universal) code lives under `app/` (using `srcDir: 'app'`), and server code lives under `server/`. Nuxt auto-imports `server/api/**` as routes based on file name (e.g. `server/api/acl/index.post.ts` → `POST /api/acl`). `shared/` holds code safe for both client and server (Zod schemas, contracts, constants). `database/` holds Drizzle schema, migrations, and seeds and is used by the server and by CLI scripts.
+Nuxt 4 convention: application (client + universal) code lives under `app/` (using `srcDir: 'app'`), and server code lives under `server/`. Nuxt auto-imports `server/api/**` as routes based on file name (e.g. `server/api/acl/show.post.ts` → `POST /api/acl/show`). `shared/` holds code safe for both client and server (Zod schemas, contracts, constants). `database/` holds Drizzle schema, migrations, and seeds and is used by the server and by CLI scripts.
 
 ```
 netops-policy-manager/
@@ -150,17 +166,13 @@ netops-policy-manager/
 │   │   │   ├── [id]/status.patch.ts
 │   │   │   └── [id]/reset-password.post.ts
 │   │   ├── acl/
-│   │   │   ├── index.get.ts
-│   │   │   ├── index.post.ts
-│   │   │   ├── [id].get.ts
-│   │   │   ├── [id].patch.ts
-│   │   │   └── [id].delete.ts
+│   │   │   ├── show.post.ts         # read-only show via n8n (no confirm)
+│   │   │   ├── preview.post.ts      # build redacted Command_Preview (add/delete)
+│   │   │   └── execute.post.ts      # confirmed add/delete → n8n → audit
 │   │   ├── routes/
-│   │   │   ├── index.get.ts
-│   │   │   ├── index.post.ts
-│   │   │   ├── [id].get.ts
-│   │   │   ├── [id].patch.ts
-│   │   │   └── [id].delete.ts
+│   │   │   ├── show.post.ts
+│   │   │   ├── preview.post.ts
+│   │   │   └── execute.post.ts
 │   │   ├── audit/
 │   │   │   ├── index.get.ts
 │   │   │   ├── [id].get.ts
@@ -178,20 +190,18 @@ netops-policy-manager/
 │   │   ├── route.service.ts
 │   │   ├── audit.service.ts
 │   │   └── dashboard.service.ts
-│   ├── repositories/
+│   ├── repositories/                # DB access only — no acl/route repos (no such tables)
 │   │   ├── user.repository.ts
 │   │   ├── session.repository.ts
-│   │   ├── acl.repository.ts
-│   │   ├── route.repository.ts
-│   │   └── audit.repository.ts
+│   │   └── audit.repository.ts      # insert + query audit_logs
 │   ├── domain/
 │   │   ├── user.ts
-│   │   ├── acl.ts
-│   │   ├── route.ts
 │   │   └── audit.ts                 # domain types (z.infer) + mappers
-│   ├── network/                     # future vendor adapter boundary (Req 7.6) — command generators live here
-│   │   ├── acl-command-generator.ts
-│   │   └── route-command-generator.ts
+│   ├── network/                     # n8n integration boundary (Req 7.6)
+│   │   ├── n8n-client.ts            # calls n8n webhook: HTTPS + API key + correlationId
+│   │   ├── command-templates.ts     # 4 static preview templates (ACL/route × add/delete)
+│   │   ├── preview.ts               # render template + field values, then redact
+│   │   └── redact.ts                # replace Execution_Credentials with ***
 │   ├── middleware/
 │   │   └── 01.session.ts            # global: resolve session → event.context.auth
 │   ├── validators/                  # server-side request/query parse helpers
@@ -203,12 +213,13 @@ netops-policy-manager/
 │       └── validate-env.ts          # runs config validation on Nitro startup (Req 14.2/14.3)
 ├── shared/
 │   ├── schemas/                     # Zod: network primitives, acl, route, user, audit, pagination
-│   │   ├── network.ts
-│   │   ├── acl.ts
-│   │   ├── route.ts
+│   │   ├── network.ts               # IPv4/CIDR/port/protocol/time/change-ticket primitives
+│   │   ├── acl.ts                   # ACL show-filter + add/delete field payloads
+│   │   ├── route.ts                 # route show-filter + add/delete field payloads
 │   │   ├── user.ts
-│   │   ├── audit.ts
-│   │   └── common.ts                # pagination, envelope types
+│   │   ├── audit.ts                 # audit query + response (incl. 4 JSONB payloads)
+│   │   ├── n8n.ts                   # n8n request/response contract (see n8n-integration spec)
+│   │   └── common.ts                # pagination, envelope types, correlationId
 │   ├── contracts/                   # API request/response contract types
 │   ├── types/                       # shared z.infer type exports
 │   └── constants/                   # roles, permissions labels, enums
@@ -219,17 +230,16 @@ netops-policy-manager/
 │   │   ├── permissions.ts
 │   │   ├── roles-permissions.ts
 │   │   ├── sessions.ts
-│   │   ├── acl-policies.ts
-│   │   ├── routes.ts
-│   │   ├── audit-logs.ts
+│   │   ├── user-mfa.ts
+│   │   ├── audit-logs.ts            # audit/logging layer (no acl_policies/routes tables)
 │   │   └── index.ts                 # re-export + enums
 │   ├── migrations/                  # generated by db:generate
 │   ├── seeds/
 │   │   └── seed.ts                  # roles + initial admin from env (Req 15.3/15.4)
 │   └── index.ts                     # drizzle client factory
 ├── tests/
-│   ├── unit/                        # schemas, generators, rbac, mappers (no DB)
-│   └── integration/                 # handlers with mocked repos/services
+│   ├── unit/                        # schemas, redaction, preview, rbac, mappers (no DB, no n8n)
+│   └── integration/                 # handlers with mocked repos + mocked N8N_Client
 ├── public/
 ├── Dockerfile
 ├── .dockerignore
@@ -258,21 +268,22 @@ import { pgEnum } from 'drizzle-orm/pg-core';
 export const authProviderEnum = pgEnum('auth_provider', ['LOCAL', 'AD']);   // account origin (users)
 export const mfaTypeEnum      = pgEnum('mfa_type',      ['TOTP']);          // second-factor type (user_mfa)
 // User active/disabled state is a boolean `users.is_active`, not an enum.
-export const aclStatusEnum  = pgEnum('acl_status',  ['DRAFT', 'ACTIVE', 'DISABLED']);
-export const routeStatusEnum= pgEnum('route_status',['DRAFT', 'ACTIVE', 'DISABLED']);
-export const protocolEnum   = pgEnum('protocol',    ['TCP', 'UDP', 'ICMP', 'ANY']);   // Req 4.4
-export const actionEnum     = pgEnum('acl_action',  ['ALLOW', 'DENY']);               // Req 4.7
-export const auditResultEnum= pgEnum('audit_result',['SUCCESS', 'FAILURE']);
+export const auditModuleEnum = pgEnum('audit_module', ['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']);   // Req 8.1
+export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE']); // Req 8.1
+export const auditStatusEnum = pgEnum('audit_status', ['SUCCESS', 'FAILED']);                     // Req 8.2
 ```
+
+There are **no** `acl_status`, `route_status`, `protocol`, or `acl_action` database enums — ACL/route data is never persisted. Protocol/action/status choices for ACL/route *input* are enforced by Zod on the form and server (see Zod schemas below), not by a DB enum.
 
 ### Drizzle Schema
 
-Requirement mapping: UUID primary keys (Req 10.2), unique email login identifier (Req 10.3), FKs (Req 10.4), no duplicate permission assignments per role (Req 10.5), indexes (Req 10.6).
+Requirement mapping: UUID primary keys (Req 10.3), unique email login identifier (Req 10.4), FKs (Req 10.5), no duplicate permission assignments per role (Req 10.6), indexes (Req 10.7). This app persists identity, RBAC, sessions, and audit only — there are no `acl_policies` or `routes` tables (Req 10.1, 10.2).
 
 > The RBAC tables below (`roles`, `permissions`, `roles_permissions`, and the `users.role_id` column) are specified in full — with initial data, initial mapping, and constraints — in the dedicated **RBAC & Permissions** spec (`.kiro/specs/rbac-permissions/design.md`). They are summarized here so the identity schema reads as a whole.
 
 ```typescript
 // database/schema/users.ts — identity foundation (LOCAL + AD)
+import { sql } from 'drizzle-orm';
 import { pgTable, uuid, varchar, text, boolean, timestamp, pgEnum, index, uniqueIndex } from 'drizzle-orm/pg-core';
 import { roles } from './roles';
 
@@ -282,9 +293,10 @@ export const users = pgTable('users', {
   userId: uuid('user_id').primaryKey().defaultRandom(),
   email: varchar('email', { length: 255 }).notNull(),                       // login identifier (unique)
   displayName: varchar('display_name', { length: 150 }).notNull(),
+  username: varchar('username', { length: 300 }),                           // AD sAMAccountName; NULL for LOCAL; additional login id (partial-unique)
   passwordHash: text('password_hash'),                                      // NULLABLE: null for AD accounts (NFR Sec 1)
   authProvider: authProviderEnum('auth_provider').notNull().default('LOCAL'),
-  externalId: varchar('external_id', { length: 255 }),                      // immutable AD id (e.g. objectGUID); unique
+  externalId: varchar('external_id', { length: 255 }),                      // immutable AD id (objectGUID as GUID string); unique
   roleId: uuid('role_id').references(() => roles.roleId, { onDelete: 'restrict' }), // nullable; one role per user (RBAC spec)
   isActive: boolean('is_active').notNull().default(true),
   lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
@@ -293,11 +305,13 @@ export const users = pgTable('users', {
 }, (t) => [
   uniqueIndex('users_email_uidx').on(t.email),                              // Req 10.3
   uniqueIndex('users_external_id_uidx').on(t.externalId),                   // recognize returning AD users
+  // Partial-unique: usernames unique among AD accounts; NULL LOCAL rows don't collide.
+  uniqueIndex('users_username_uidx').on(t.username).where(sql`${t.username} IS NOT NULL`),
   index('users_role_id_idx').on(t.roleId),                                  // Req 10.6
 ]);
 ```
 
-The `users` table is the identity foundation for both account origins. LOCAL accounts carry an Argon2 `passwordHash`; AD accounts have `passwordHash = null` and are recognized on return by `externalId` (see the Active Directory Authentication spec). The login identifier is `email` (there is no separate `username` column). `status` is represented by the boolean `isActive` rather than an enum.
+The `users` table is the identity foundation for both account origins. LOCAL accounts carry an Argon2 `passwordHash`; AD accounts have `passwordHash = null` and are recognized on return by `externalId` (see the Active Directory Authentication spec). Users log in with an `email` **or** — for AD accounts — their `username` (AD `sAMAccountName`); `username` is nullable (LOCAL accounts have none) and partial-unique. `status` is represented by the boolean `isActive` rather than an enum.
 
 ```typescript
 // database/schema/roles.ts — master role table (data-driven RBAC)
@@ -393,93 +407,43 @@ export const userMfa = pgTable('user_mfa', {
 
 A session row exists only after the TOTP second factor tied to an MFA_Challenge succeeds (Req 1.5, 1.7). The raw session token is never stored — only its SHA-256 hash — and lives client-side solely in the `netops_session` HttpOnly cookie. The pre-auth MFA_Challenge itself is **not** a table: it is a short-lived, HMAC-signed cookie (`netops_mfa_challenge`, keyed by `SESSION_SECRET`, TTL `MFA_CHALLENGE_TTL_MINUTES`) carrying the user id and purpose (`MFA_ENROLLMENT | MFA_LOGIN`).
 
-```typescript
-// database/schema/acl-policies.ts
-import { pgTable, uuid, varchar, integer, timestamp, index } from 'drizzle-orm/pg-core';
-import { users } from './users';
-import { aclStatusEnum, protocolEnum, actionEnum } from './index';
-
-export const aclPolicies = pgTable('acl_policies', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: varchar('name', { length: 128 }).notNull(),
-  source: varchar('source', { length: 64 }).notNull(),
-  destination: varchar('destination', { length: 64 }).notNull(),
-  protocol: protocolEnum('protocol').notNull(),
-  port: integer('port'),                                    // null for ICMP/ANY (Req 4.6)
-  action: actionEnum('action').notNull(),
-  timeStart: varchar('time_start', { length: 8 }),
-  timeEnd: varchar('time_end', { length: 8 }),
-  changeTicket: varchar('change_ticket', { length: 64 }),
-  description: varchar('description', { length: 1000 }),
-  status: aclStatusEnum('status').notNull().default('DRAFT'),
-  generatedCommand: varchar('generated_command', { length: 2000 }).notNull(), // server-set (Req 4.11)
-  createdBy: uuid('created_by').notNull().references(() => users.userId),       // Req 10.4
-  updatedBy: uuid('updated_by').notNull().references(() => users.userId),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  nameIdx: index('acl_name_idx').on(t.name),                 // Req 10.6
-  statusIdx: index('acl_status_idx').on(t.status),
-  changeTicketIdx: index('acl_change_ticket_idx').on(t.changeTicket),
-}));
-```
+There are intentionally **no** `acl_policies` or `routes` tables. This application does not store network device configuration state (Req 10.1, 10.2); ACL/route data flows through as a field payload to n8n and is recorded only as an audit log.
 
 ```typescript
-// database/schema/routes.ts
-import { pgTable, uuid, varchar, timestamp, index } from 'drizzle-orm/pg-core';
-import { users } from './users';
-import { routeStatusEnum } from './index';
-
-export const routes = pgTable('routes', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  name: varchar('name', { length: 128 }).notNull(),
-  destination: varchar('destination', { length: 64 }).notNull(),   // CIDR (Req 6.4)
-  source: varchar('source', { length: 64 }),
-  nextHop: varchar('next_hop', { length: 64 }).notNull(),          // IP (Req 6.5)
-  policy: varchar('policy', { length: 128 }),
-  timeStart: varchar('time_start', { length: 8 }),
-  timeEnd: varchar('time_end', { length: 8 }),
-  changeTicket: varchar('change_ticket', { length: 64 }),
-  status: routeStatusEnum('status').notNull().default('DRAFT'),
-  generatedCommand: varchar('generated_command', { length: 2000 }).notNull(), // server-set (Req 6.8)
-  createdBy: uuid('created_by').notNull().references(() => users.userId),
-  updatedBy: uuid('updated_by').notNull().references(() => users.userId),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => ({
-  destinationIdx: index('routes_destination_idx').on(t.destination),  // Req 10.6
-  statusIdx: index('routes_status_idx').on(t.status),
-}));
-```
-
-```typescript
-// database/schema/audit-logs.ts
+// database/schema/audit-logs.ts — the single operational record (system of record)
 import { pgTable, uuid, varchar, timestamp, jsonb, index } from 'drizzle-orm/pg-core';
-import { auditResultEnum } from './index';
+import { users } from './users';
+import { auditModuleEnum, auditActionEnum, auditStatusEnum } from './index';
 
 export const auditLogs = pgTable('audit_logs', {
   id: uuid('id').primaryKey().defaultRandom(),
-  timestamp: timestamp('timestamp', { withTimezone: true }).notNull().defaultNow(),
-  actorUserId: uuid('actor_user_id'),          // nullable: LOGIN_FAILED may have no known user
-  actorUsername: varchar('actor_username', { length: 64 }),
-  actorRole: varchar('actor_role', { length: 16 }),
-  activity: varchar('activity', { length: 64 }).notNull(),   // LOGIN_SUCCESS ... ROUTE_DELETED (Req 8.1)
-  entityType: varchar('entity_type', { length: 32 }),        // USER | ACL | ROUTE | SESSION
-  entityId: uuid('entity_id'),
-  result: auditResultEnum('result').notNull(),
+  userId: uuid('user_id').references(() => users.userId, { onDelete: 'set null' }), // nullable: a failed login may have no known user
+  username: varchar('username', { length: 150 }),          // snapshot at action time (Req 8.2)
+  userRole: varchar('user_role', { length: 100 }),         // snapshot at action time
+  module: auditModuleEnum('module').notNull(),             // AUTH | USER | ACL | ROUTE | N8N (Req 8.1)
+  action: auditActionEnum('action').notNull(),             // LOGIN | SHOW | ADD | DELETE | UPDATE (Req 8.1)
+  status: auditStatusEnum('status').notNull(),             // SUCCESS | FAILED (Req 8.6)
   sourceIp: varchar('source_ip', { length: 64 }),
-  changeTicket: varchar('change_ticket', { length: 64 }),
-  beforeState: jsonb('before_state'),   // JSONB (Req 8.2)
-  afterState: jsonb('after_state'),     // JSONB (Req 8.2)
-  metadata: jsonb('metadata'),          // JSONB (Req 8.2)
+  userAgent: varchar('user_agent', { length: 512 }),
+  correlationId: uuid('correlation_id').notNull(),         // links request → n8n → device (Req 8.5)
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // Four flexible JSONB payloads (Req 8.3). Shapes may evolve with n8n without a
+  // migration to the fixed columns (Req 8.12). Never contain raw credentials/secrets.
+  requestPayload: jsonb('request_payload'),                // submitted field values / show filter
+  commandPayload: jsonb('command_payload'),                // REDACTED command snapshot, e.g. { device, command: [...] }
+  executionPayload: jsonb('execution_payload'),            // n8n metadata: executor, workflow_id, execution_id, timings
+  responsePayload: jsonb('response_payload'),              // device output or error: { device, output } | { device, error }
 }, (t) => ({
-  timestampIdx: index('audit_timestamp_idx').on(t.timestamp),        // Req 10.6
-  actorIdx: index('audit_actor_idx').on(t.actorUserId),
-  activityIdx: index('audit_activity_idx').on(t.activity),
+  createdAtIdx: index('audit_created_at_idx').on(t.createdAt),      // Req 10.7
+  userIdx: index('audit_user_id_idx').on(t.userId),
+  moduleIdx: index('audit_module_idx').on(t.module),
+  actionIdx: index('audit_action_idx').on(t.action),
+  statusIdx: index('audit_status_idx').on(t.status),
+  correlationIdx: index('audit_correlation_id_idx').on(t.correlationId),
 }));
 ```
 
-There is **no** endpoint or repository method that deletes audit rows during normal operation (Req 8.6).
+There is **no** endpoint or repository method that deletes or mutates audit rows during normal operation (Req 8.7). The four JSONB columns are the flexibility point: their internal shape can track n8n's evolving request/response without altering the fixed columns (Req 8.12). Redaction of the Execution_Credentials to `***` happens before any write, so credentials never reach `request_payload` or `command_payload` (Req 8.4).
 
 ### Zod Application Schemas
 
@@ -515,23 +479,37 @@ const DescriptionSchema = z.string().max(1000);  // Req 5.10
 
 #### ACL schemas (`shared/schemas/acl.ts`) — Req 4
 
+These are **request payloads and a show filter**, not DB rows — the app stores no ACL rows. Field names/shapes are the app's contract with n8n and may be tuned to n8n's needs (see the n8n Integration spec). The Execution_Credentials are a separate, redaction-tracked object reused across add/delete/show.
+
 ```typescript
-const AclBase = z.object({
+// Per-engineer credentials supplied on every operation, forwarded to n8n, never
+// persisted, never returned to the client, and redacted to *** in preview/audit.
+export const ExecCredentialsSchema = z.object({
+  execUsername: z.string().min(1).max(128),
+  execPassword: z.string().min(1).max(256),
+});
+
+// ACL SHOW — read-only, executes immediately (no confirm). A single filter value.
+export const AclShowSchema = z.object({
+  filter: z.string().min(1).max(256),   // e.g. an IP or ACL name to grep for
+}).merge(ExecCredentialsSchema);
+
+// ACL ADD field payload (fields MAY be tuned to n8n). Cross-field port rules apply.
+const AclAddBase = z.object({
   name: z.string().min(1).max(128),
-  source: z.string().min(1),          // Ipv4 / Cidr / 'any' per field policy
+  source: z.string().min(1),                 // Ipv4 / Cidr / 'any'
+  sourceMask: z.string().min(1).optional(),
   destination: z.string().min(1),
-  protocol: ProtocolSchema,
+  destinationMask: z.string().min(1).optional(),
+  protocol: ProtocolSchema,                  // Req 4.4
   port: PortSchema.optional(),
-  action: z.enum(['ALLOW', 'DENY']),  // Req 4.7
+  action: z.enum(['ALLOW', 'DENY']),         // Req 4.7
   timeStart: TimeSchema.optional(),
   timeEnd: TimeSchema.optional(),
   changeTicket: ChangeTicketSchema.optional(),
   description: DescriptionSchema.optional(),
-  status: z.enum(['DRAFT', 'ACTIVE', 'DISABLED']),  // Req 4.8
 });
-
-// Cross-field refinements (Req 4.5, 4.6)
-const withPortRules = <T extends typeof AclBase>(s: T) => s.superRefine((v, ctx) => {
+const withPortRules = <T extends z.ZodType>(s: T) => s.superRefine((v: any, ctx) => {
   if ((v.protocol === 'TCP' || v.protocol === 'UDP') && v.port === undefined) {
     ctx.addIssue({ code: 'custom', path: ['port'], message: 'Port required for TCP/UDP' }); // Req 4.5
   }
@@ -539,43 +517,68 @@ const withPortRules = <T extends typeof AclBase>(s: T) => s.superRefine((v, ctx)
     ctx.addIssue({ code: 'custom', path: ['port'], message: 'ICMP must not have a port' }); // Req 4.6
   }
 });
+export const AclAddSchema = withPortRules(AclAddBase.merge(ExecCredentialsSchema));
 
-export const CreateAclSchema = withPortRules(AclBase);           // excludes Server_Controlled_Fields (Req 4.12)
-export const UpdateAclSchema = withPortRules(AclBase.partial().required({ status: true }));
-export const AclResponseSchema = AclBase.extend({
-  id: z.string().uuid(),
-  generatedCommand: z.string(),
-  createdBy: z.string().uuid(),
-  updatedBy: z.string().uuid(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
-});
+// ACL DELETE field payload — the identifying fields needed to remove the rule.
+export const AclDeleteSchema = z.object({
+  name: z.string().min(1).max(128),
+  source: z.string().min(1),
+  destination: z.string().min(1),
+  changeTicket: ChangeTicketSchema.optional(),
+}).merge(ExecCredentialsSchema);
+
+// Preview request: which operation to preview + its field payload (no confirm yet).
+export const AclPreviewSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('ADD') }).merge(AclAddBase).merge(ExecCredentialsSchema),
+  z.object({ operation: z.literal('DELETE'), name: z.string(), source: z.string(), destination: z.string() }).merge(ExecCredentialsSchema),
+]);
 ```
+
+The server builds the redacted Command_Preview from these fields; it never trusts a client-supplied preview string, `correlationId`, or audit `status` (Req 11.4).
 
 #### Route schemas (`shared/schemas/route.ts`) — Req 6
 
+Mirrors ACL: show filter + add/delete field payloads, no DB rows, credentials redaction-tracked.
+
 ```typescript
-const RouteBase = z.object({
+// Route SHOW — read-only, immediate (no confirm).
+export const RouteShowSchema = z.object({
+  filter: z.string().min(1).max(256),   // e.g. a destination or next hop
+}).merge(ExecCredentialsSchema);
+
+// Route ADD field payload
+export const RouteAddSchema = z.object({
   name: z.string().min(1).max(128),
-  destination: CidrSchema,            // Req 6.4
+  destination: CidrSchema,               // Req 6.4
   source: z.string().min(1).optional(),
-  nextHop: IpAddressSchema,           // Req 6.5
+  nextHop: IpAddressSchema,              // Req 6.5
   policy: z.string().max(128).optional(),
   timeStart: TimeSchema.optional(),
   timeEnd: TimeSchema.optional(),
   changeTicket: ChangeTicketSchema.optional(),
-  status: z.enum(['DRAFT', 'ACTIVE', 'DISABLED']),
-});
+}).merge(ExecCredentialsSchema);
 
-export const CreateRouteSchema = RouteBase;                     // Req 6.9 (no server fields)
-export const UpdateRouteSchema = RouteBase.partial().required({ status: true });
-export const RouteResponseSchema = RouteBase.extend({
-  id: z.string().uuid(),
-  generatedCommand: z.string(),
-  createdBy: z.string().uuid(),
-  updatedBy: z.string().uuid(),
-  createdAt: z.string(),
-  updatedAt: z.string(),
+// Route DELETE field payload
+export const RouteDeleteSchema = z.object({
+  destination: CidrSchema,
+  nextHop: IpAddressSchema.optional(),
+  changeTicket: ChangeTicketSchema.optional(),
+}).merge(ExecCredentialsSchema);
+
+export const RoutePreviewSchema = z.discriminatedUnion('operation', [
+  z.object({ operation: z.literal('ADD') }).merge(RouteAddSchema.omit({ execUsername: true, execPassword: true })).merge(ExecCredentialsSchema),
+  z.object({ operation: z.literal('DELETE') }).merge(RouteDeleteSchema.omit({ execUsername: true, execPassword: true })).merge(ExecCredentialsSchema),
+]);
+```
+
+The shared **Operation Result** returned to the client after a show/execute (`shared/schemas/n8n.ts`) exposes the outcome without secrets:
+
+```typescript
+export const OperationResultSchema = z.object({
+  correlationId: z.string().uuid(),
+  status: z.enum(['SUCCESS', 'FAILED']),
+  output: z.string().nullable(),        // raw device output for the terminal box (show/add/delete)
+  error: z.string().nullable(),         // safe error message when FAILED (never leaks creds/secrets)
 });
 ```
 
@@ -602,6 +605,7 @@ export const UserResponseSchema = z.object({
   userId: z.string().uuid(),
   email: z.string().email(),
   displayName: z.string(),
+  username: z.string().nullable(),   // AD sAMAccountName; null for LOCAL. Shown in the profile.
   authProvider: z.enum(['LOCAL', 'AD']),
   isActive: z.boolean(),
   lastLoginAt: z.date().nullable(),
@@ -623,26 +627,33 @@ export const PaginationQuerySchema = z.object({
 });
 
 export const AuditQuerySchema = PaginationQuerySchema.extend({
-  activity: z.string().optional(),
-  result: z.enum(['SUCCESS', 'FAILURE']).optional(),
-  from: z.string().optional(),        // date filter (Req 8.7)
+  module: z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']).optional(),  // Req 8.8
+  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE']).optional(),
+  status: z.enum(['SUCCESS', 'FAILED']).optional(),
+  correlationId: z.string().uuid().optional(),   // pull the whole trail of one operation
+  from: z.string().optional(),                   // date filter (Req 8.8)
   to: z.string().optional(),
 });
 
+// Safe outbound audit shape (Req 8.9). JSONB payloads are already redacted at
+// write time, so they are safe to surface; they are typed unknown because the
+// shape is intentionally flexible (Req 8.12).
 export const AuditResponseSchema = z.object({
   id: z.string().uuid(),
-  timestamp: z.string(),
-  actorUsername: z.string().nullable(),
-  actorRole: z.string().nullable(),
-  activity: z.string(),
-  entityType: z.string().nullable(),
-  entityId: z.string().nullable(),
-  result: z.enum(['SUCCESS', 'FAILURE']),
+  createdAt: z.string(),
+  userId: z.string().uuid().nullable(),
+  username: z.string().nullable(),
+  userRole: z.string().nullable(),
+  module: z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']),
+  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE']),
+  status: z.enum(['SUCCESS', 'FAILED']),
   sourceIp: z.string().nullable(),
-  changeTicket: z.string().nullable(),
-  beforeState: z.unknown().nullable(),
-  afterState: z.unknown().nullable(),
-  metadata: z.unknown().nullable(),
+  userAgent: z.string().nullable(),
+  correlationId: z.string().uuid(),
+  requestPayload: z.unknown().nullable(),
+  commandPayload: z.unknown().nullable(),
+  executionPayload: z.unknown().nullable(),
+  responsePayload: z.unknown().nullable(),
 });
 
 // Startup env validation (Req 14.1, 14.2, 14.3). Validated once by the Nitro
@@ -663,7 +674,11 @@ export const EnvSchema = z.object({
   AD_BIND_DN: z.string().optional(),
   AD_BIND_PASSWORD: z.string().optional(),
   AD_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
-  AD_CAPTURE: z.coerce.boolean().default(false),              // TEMPORARY: Phase-1 discovery only; removed after mapping
+  // n8n integration (see n8n-integration spec). Required for ACL/route execution.
+  // The API key is server-side only and never exposed via runtimeConfig.public.
+  N8N_BASE_URL: z.string().url(),                              // base for the ACL/route webhooks
+  N8N_API_KEY: z.string().min(1),                             // sent to n8n on every call; never returned to the client
+  N8N_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
   // SEED_USER_* consumed by db:seed (dev LOCAL admin), not required at runtime.
 });
 ```
@@ -677,7 +692,7 @@ Authentication is a two-step flow: a **first factor** (LOCAL password check or A
 - **First factor — LOCAL** (`auth.service.ts`) — `verifyLocalCredentials(db, email, password)` loads the user by email and runs `argon2.verify` against the stored hash, using a static dummy-hash verification for unknown/unusable accounts to keep timing uniform (anti-enumeration). Usable requires `is_active`, `auth_provider = 'LOCAL'`, and a non-null `password_hash` (Req 1.1, 1.13).
 - **First factor — AD** (`server/auth/ad/`, ad-authentication spec) — an LDAP bind + search + user-bind; on success the user is resolved by `external_id` or JIT-provisioned. Rejoins the same MFA-challenge step.
 - **Password hashing** (`password.service.ts`) — `hashPassword(raw)`, `verifyPassword(hash, raw)` using Argon2id (NFR Sec 1). LOCAL only.
-- **MFA / TOTP** (`mfa.service.ts`) — `otplib` generates the secret and verifies 6-digit codes; the secret is encrypted at rest with AES-256-GCM (`MFA_ENCRYPTION_KEY`). Enrollment stores a disabled device and marks it enabled only after the first code is confirmed. Up to `MFA_DEVICE_LIMIT` (2) devices per user (enforced in the service). Provider-agnostic — identical for LOCAL and AD (Req 1.4, 1.5).
+- **MFA / TOTP** (`mfa.service.ts`) — `otplib` generates the secret and verifies 6-digit codes; the secret is encrypted at rest with AES-256-GCM (`MFA_ENCRYPTION_KEY`). Verification uses `epochTolerance: 30` (±one 30s step) so a correct code entered near a window boundary or with minor client/server clock skew is accepted rather than intermittently rejected. Enrollment stores a disabled device and marks it enabled only after the first code is confirmed. Up to `MFA_DEVICE_LIMIT` (2) devices per user (enforced in the service). The client renders the code as six single-digit boxes (`MfaCodeInput`) and auto-submits on the sixth digit. Provider-agnostic — identical for LOCAL and AD (Req 1.4, 1.5).
 - **MFA_Challenge** (`utils/mfa-challenge.ts`) — a stateless HMAC-SHA256-signed cookie (`netops_mfa_challenge`, keyed by `SESSION_SECRET`) carrying `{ userId, purpose }` where purpose is `MFA_ENROLLMENT | MFA_LOGIN`; TTL `MFA_CHALLENGE_TTL_MINUTES`. `issueMfaChallenge(event, userId, purpose)` / `readMfaChallenge(event, expectedPurpose)` / `clearMfaChallenge(event)`.
 - **Session** (`session.service.ts`) — `createSession(db, event, userId)` mints a raw token (`base64url(randomBytes(32))`), stores only its `sha256` hash in `sessions.token_hash`, and sets the cookie; TTL `SESSION_TTL_HOURS`. `validateSession`, `revokeSession`, `revokeAllUserSessions`. Keyed on `userId` — provider-agnostic (Req 1.7).
 - **Session middleware** (`server/middleware/*.session.ts`) — reads the cookie, hashes it, looks up the session, checks expiry (expired → context stays unauthenticated so `requirePermission` yields 401, Req 1.10), resolves the user + effective permissions, refreshes `lastUsedAt`, and sets `event.context.auth = { user, permissions }`.
@@ -724,33 +739,55 @@ Every protected handler calls `requirePermission` first (e.g. `requirePermission
 
 ### Services (`server/services/`)
 
-Each mutating service method opens one Drizzle transaction and writes both the mutation and its audit entry inside it. If the audit write throws, the transaction rolls back the mutation (Req 8.4, 8.5).
+Identity/user mutations still open one Drizzle transaction wrapping the row change plus its audit insert (Req 8.4). ACL/route operations have **no row to mutate** — they orchestrate n8n and then write a single audit log. Because there is no local ACL/route state, the audit write and the n8n call cannot be one DB transaction; instead the service always records an audit log for the attempt, marking it `SUCCESS` or `FAILED` from the n8n outcome (Req 4.13, 6.10, 8.6). Every audit write is preceded by redaction (Req 8.4).
 
-- **AuthService** — first factor: `verifyLocalCredentials(db, email, password)` (LOCAL) or the AD provider (ad-authentication spec), then `issueMfaChallenge`; second factor: `verifyMfaLogin` → `createSession` + LOGIN_SUCCESS; `logout(tokenHash, ctx)` → invalidate + LOGOUT; `me(user)`. LOGIN_FAILED on a failed first/second factor (Req 1.1–1.15).
-- **UserService** — `list(query)`, `create(input, actor)` (+USER_CREATED, Req 3.8), `updateBasic(id, input, actor)` (+USER_UPDATED, Req 3.9), `changeRole(id, input, actor)` (+USER_ROLE_CHANGED, Req 3.4), `setStatus(id, active, actor)` (+USER_STATUS_CHANGED, Req 3.5), `resetPassword(id, input, actor)` (Argon2 hash, Req 3.6). All reads mapped through `UserResponseSchema` (Req 3.7). *Transaction boundary:* one tx per mutation wrapping the row change + audit insert.
-- **AclService** — `list`, `getById`, `create(input, actor)`, `update(id, input, actor)`, `remove(id, actor)`. On create/update it calls `AclCommandGenerator.generate(domain)` and stores the result in `generatedCommand` (Req 4.11). *Transaction boundary:* mutation + ACL_CREATED/UPDATED/DELETED audit in one tx (Req 4.13–4.15).
-- **RouteService** — mirror of AclService using `RouteCommandGenerator` (Req 6.8) and ROUTE_* audit entries in one tx (Req 6.10–6.12).
-- **AuditService** — `record(entry, tx)` (transaction-aware; called by other services with the current tx handle — Req 8.4), `list(query)` (Req 8.7), `getById(id)` (Req 8.8), `export(query)` (Req 8.9). Strips secrets from `before/after/metadata` before writing (Req 8.3, NFR Sec 5). No delete method (Req 8.6).
-- **DashboardService** — `summary()` returns `{ aclTotal, aclActive, routeTotal, routeActive, recentActivities }` via count queries (Req 9.1–9.6). No chart rendering (Req 9.6, NFR Perf 3).
+- **AuthService** — first factor: `verifyLocalCredentials(db, email, password)` (LOCAL) or the AD provider (ad-authentication spec), then `issueMfaChallenge`; second factor: `verifyMfaLogin` → `createSession` + `AUTH/LOGIN SUCCESS`; `logout` → invalidate + `AUTH/LOGIN` logout entry; `me(user)`. `AUTH/LOGIN FAILED` on a failed factor (Req 1.1–1.15).
+- **UserService** — `list(query)`, `create` (+`USER/ADD`), `updateBasic` (+`USER/UPDATE`), `changeRole` (+`USER/UPDATE`), `setStatus` (+`USER/UPDATE`), `resetPassword` (Argon2 hash). All reads mapped through `UserResponseSchema` (Req 3.7). One tx per mutation wrapping the row change + audit insert.
+- **AclService** — `show(input, actor, ctx)`, `preview(input)`, `execute(operation, input, actor, ctx)`.
+  - `show`: validate `AclShowSchema` → generate correlationId → `N8N_Client.aclShow(payload)` → return `OperationResult` (raw output) → record `ACL/SHOW` audit. Read-only, no confirm (Req 4.1, 4.2).
+  - `preview`: validate `AclPreviewSchema` → build redacted Command_Preview via `renderPreview` + `redact` → return the preview string. No n8n call, no audit (Req 4.8, 7.2, 7.3).
+  - `execute` (ADD/DELETE): validate the field schema → generate correlationId → `N8N_Client.aclExecute(operation, payload)` → record `ACL/ADD|DELETE` audit with `status` from the n8n result, `request_payload` (redacted), `command_payload` (redacted preview snapshot), `execution_payload` (n8n metadata), `response_payload` (device output/error) (Req 4.9, 4.10, 4.13, 4.14, 4.15).
+- **RouteService** — mirror of AclService for `ROUTES_SHOW/ADD/DELETE`, module `ROUTE` (Req 6).
+- **AuditService** — `record(entry)` (redacts creds/secrets then inserts — Req 8.4), `list(query)` (Req 8.8), `getById(id)` (Req 8.9), `export(query)` (Req 8.10). No delete/mutate method (Req 8.7).
+- **DashboardService** — `summary()` returns `{ totalExecutions, successCount, failedCount, perModule: { ACL, ROUTE, ... }, recentActivities, errorSummary }` computed from `audit_logs` (Req 9.1–9.6). No chart rendering (Req 9.7, NFR Perf 3).
 
-### Command Generators (`server/network/`) — Req 7
+### n8n Client, Command Preview & Redaction (`server/network/`) — Req 7
+
+`server/network/` is the integration boundary. It contains the n8n webhook client, the static command-preview templates, the preview renderer, and the redactor. It contains **no** device connection logic and **no** simulated connections (Req 7.4, 7.6).
 
 ```typescript
-export interface AclCommandGenerator {
-  generate(acl: AclDomain): string;    // preview only; never executes (Req 7.3)
+// server/network/n8n-client.ts — the ONLY component that calls n8n.
+export interface N8nClient {
+  aclShow(payload, correlationId): Promise<N8nResult>;
+  aclExecute(op: 'ADD' | 'DELETE', payload, correlationId): Promise<N8nResult>;
+  routeShow(payload, correlationId): Promise<N8nResult>;
+  routeExecute(op: 'ADD' | 'DELETE', payload, correlationId): Promise<N8nResult>;
 }
-export interface RouteCommandGenerator {
-  generate(route: RouteDomain): string;
-}
+// Each call POSTs to the configured n8n webhook with the API key header and the
+// correlationId, sends the FIELD payload (not a command string), and enforces
+// N8N_TIMEOUT_MS. It maps the n8n response into a normalized N8nResult
+// { status, output?, error?, execution? } (see n8n-integration spec).
+
+// server/network/command-templates.ts — 4 static preview templates.
+// Placeholders are filled from the operator's fields; execUsername/execPassword
+// placeholders are used only so the preview shows WHERE creds would go, then redacted.
+export const ACL_ADD_TEMPLATE = [/* static lines with ${placeholders} */];
+export const ACL_DELETE_TEMPLATE = [/* ... */];
+export const ROUTE_ADD_TEMPLATE = [/* ... */];
+export const ROUTE_DELETE_TEMPLATE = [/* ... */];
+
+// server/network/preview.ts — render template + fields → string[]/string (Req 7.1, 7.2)
+// server/network/redact.ts — replace Execution_Credentials with '***' (Req 7.2, 8.4)
+export function redact(text: string, creds: { execUsername: string; execPassword: string }): string;
 ```
 
-A default generic/Cisco-like implementation (`DefaultAclCommandGenerator`, `DefaultRouteCommandGenerator`) produces preview strings such as `access-list <name> <action> <protocol> <source> <destination> [eq <port>]`. Generators are pure functions of the domain model and run only on the server (Req 7.1, 7.2). The domain model carries no vendor syntax (Req 7.5). `server/network/` is the boundary where future vendor adapters swap in behind these interfaces without touching the domain model (Req 7.4, 7.6); no simulated device connections are added.
+The Command_Preview is built and redacted **on the server** and returned for display only; it is never the payload sent to n8n (Req 7.3, 7.5). The templates are hardcoded and vendor-shaped; they exist purely so the engineer can review the intent — n8n composes and runs the real command from the field payload. Show output returned by n8n is treated as untrusted data for display/parsing (Req 7.7).
 
 ### API Endpoints — Req 12, Req 16
 
 | Method | Path | Permission | Request schema | Response |
 |--------|------|-----------|----------------|----------|
-| POST | `/api/auth/login` | none | `{email, password}` (LoginSchema) | `{status: MFA_SETUP_REQUIRED \| MFA_REQUIRED, challengeExpiresAt}` (Req 1.1–1.3) |
+| POST | `/api/auth/login` | none | `{identifier, password}` (LoginSchema — identifier is an email or, for AD, a username) | `{status: MFA_SETUP_REQUIRED \| MFA_REQUIRED, challengeExpiresAt}` (Req 1.1–1.3) |
 | POST | `/api/auth/mfa/setup` | valid `MFA_ENROLLMENT` challenge | — | `{otpauthUri}` (Req 1.4) |
 | POST | `/api/auth/mfa/verify` | valid `MFA_LOGIN` challenge | `VerifyMfaSchema` `{code}` | `{status: AUTHENTICATED, user}` (Req 1.5) |
 | POST | `/api/auth/mfa/devices*` | valid session or `MFA_ENROLLMENT` challenge | `AddMfaDeviceSchema` / `VerifyMfaDeviceSchema` | device response (Req 1.4) |
@@ -764,22 +801,24 @@ A default generic/Cisco-like implementation (`DefaultAclCommandGenerator`, `Defa
 | PATCH | `/api/users/:id/role` | ADMINISTRATION_MANAGE | `ChangeUserRoleSchema` | `UserResponse` (Req 3.4) |
 | PATCH | `/api/users/:id/status` | ADMINISTRATION_MANAGE | `{status}` | `UserResponse` (Req 3.5) |
 | POST | `/api/users/:id/reset-password` | ADMINISTRATION_MANAGE | `ResetPasswordSchema` | `{}` (Req 3.6) |
-| GET | `/api/acl` | ACL_POLICIES_SHOW | `PaginationQuerySchema` + filters | `Paginated<AclResponse>` (Req 4.1) |
-| POST | `/api/acl` | ACL_POLICIES_ADD | `CreateAclSchema` | `AclResponse` (Req 4.3) |
-| GET | `/api/acl/:id` | ACL_POLICIES_SHOW | — | `AclResponse` (Req 4.2) |
-| DELETE | `/api/acl/:id` | ACL_POLICIES_DELETE | — | `{}` (Req 4.10) |
-| GET | `/api/routes` | ROUTES_SHOW | `PaginationQuerySchema` + filters | `Paginated<RouteResponse>` (Req 6.1) |
-| POST | `/api/routes` | ROUTES_ADD | `CreateRouteSchema` | `RouteResponse` (Req 6.3) |
-| GET | `/api/routes/:id` | ROUTES_SHOW | — | `RouteResponse` (Req 6.2) |
-| DELETE | `/api/routes/:id` | ROUTES_DELETE | — | `{}` (Req 6.7) |
-| GET | `/api/audit` | valid session | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.7) |
-| GET | `/api/audit/:id` | valid session | — | `AuditResponse` (Req 8.8) |
-| GET | `/api/audit/export` | valid session | `AuditQuerySchema` | export payload (Req 8.9) |
-| GET | `/api/dashboard/summary` | valid session | — | summary object (Req 9) |
+| POST | `/api/acl/show` | ACL_POLICIES_SHOW | `AclShowSchema` | `OperationResult` (raw output) (Req 4.1, 4.2) |
+| POST | `/api/acl/preview` | ACL_POLICIES_ADD or ACL_POLICIES_DELETE | `AclPreviewSchema` | `{ preview: string }` (redacted) (Req 4.8) |
+| POST | `/api/acl/execute` | ACL_POLICIES_ADD (op=ADD) / ACL_POLICIES_DELETE (op=DELETE) | `{operation} & AclAddSchema \| AclDeleteSchema` | `OperationResult` (Req 4.9, 4.10) |
+| POST | `/api/routes/show` | ROUTES_SHOW | `RouteShowSchema` | `OperationResult` (raw output) (Req 6.1, 6.2) |
+| POST | `/api/routes/preview` | ROUTES_ADD or ROUTES_DELETE | `RoutePreviewSchema` | `{ preview: string }` (redacted) (Req 6.6) |
+| POST | `/api/routes/execute` | ROUTES_ADD (op=ADD) / ROUTES_DELETE (op=DELETE) | `{operation} & RouteAddSchema \| RouteDeleteSchema` | `OperationResult` (Req 6.7, 6.8) |
+| GET | `/api/audit` | valid session | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.8) |
+| GET | `/api/audit/:id` | valid session | — | `AuditResponse` (Req 8.9) |
+| GET | `/api/audit/export` | valid session | `AuditQuerySchema` | export payload (Req 8.10) |
+| GET | `/api/dashboard/summary` | valid session | — | summary object from `audit_logs` (Req 9) |
 
-The ACL/Route update (`PATCH`) endpoints from the original design are intentionally omitted here: this RBAC phase defines only `SHOW`, `ADD`, and `DELETE` actions for `ACL_POLICIES` and `ROUTES`. If an edit action is added later, a corresponding `UPDATE` permission is introduced in the RBAC spec first.
+Notes on the ACL/route endpoints:
+- All ACL/route endpoints are `POST` (including show), because they carry the Execution_Credentials in the body and must never place them in a URL/query.
+- The permission for `preview` and `execute` is resolved from the `operation` field: `ADD` requires `*_ADD`, `DELETE` requires `*_DELETE`. `show` requires `*_SHOW`.
+- There are no ACL/route list/get-by-id endpoints — the app has no local ACL/route store; the Log Trail (`/api/audit`) is the history.
+- `preview` performs no execution and writes no audit entry; only `show` and `execute` call n8n and record an audit log.
 
-All list endpoints paginate server-side (Req 12.6, NFR Perf 1).
+The audit and (if any) list endpoints paginate server-side (Req 12.6, NFR Perf 1).
 
 ### Frontend Components — Req 13, Req 2.7
 
@@ -823,51 +862,50 @@ A central error handler (Nitro `error` hook + per-handler `try/catch` wrapper) m
 - `AppError('UNAUTHENTICATED')` → 401, `AppError('FORBIDDEN')` → 403, `NOT_FOUND` → 404, `CONFLICT` → 409.
 - Any other error → `INTERNAL_ERROR` (500) with a generic message; SQL text, stack traces, filesystem paths, and secrets are excluded from the response and logged server-side only (Req 12.4, 12.5).
 
-## Data Flow — Add ACL (representative mutation)
+## Data Flow — Add ACL (representative operation)
 
-Sequence for `POST /api/acl` (Req 4.3, 4.11, 4.13):
+The add/delete flow is: fill form → preview (redacted) → confirm → execute via n8n → audit. Preview and execute are two server calls; only execute touches n8n and writes an audit log.
 
-1. The ACL form validates input client-side with the shared `CreateAclSchema` (Req 13.4).
-2. `useApi()` sends `POST /api/acl` with the session cookie.
-3. The global session middleware resolves `event.context.auth` (Req 1, 2.5).
-4. The handler parses the body with `CreateAclSchema` — Server_Controlled_Fields are absent from the schema, so any client-supplied `id`/`generatedCommand`/`createdBy`/etc. are ignored (Req 4.12, 11.4); invalid input → `VALIDATION_ERROR` with `fields`.
-5. The handler calls `requirePermission(event, 'ACL_CREATE')` → 401/403 if it fails (Req 2.5, 2.6).
-6. `AclService.create(input, actor)` opens one transaction: it builds the domain object, calls `AclCommandGenerator.generate()` to produce `generatedCommand` (Req 4.11), inserts the ACL row, and inserts an `ACL_CREATED` audit entry in the same transaction (Req 4.13, 8.4). If either write fails, the transaction rolls back (Req 8.5).
-7. The service maps the new row to the API Response via `AclResponseSchema` (never a raw DB row — Req 11.3).
-8. The handler wraps it as `{success:true, data}` (Req 12.1); the client unwraps it and updates the list.
+**Preview** (`POST /api/acl/preview`, Req 4.8):
+1. The ACL form validates input client-side with `AclAddSchema` (Req 13.4).
+2. `useApi()` sends `POST /api/acl/preview` with the session cookie.
+3. Session middleware resolves `event.context.auth`; the handler calls `requirePermission(event, 'ACL_POLICIES_ADD')`.
+4. `AclService.preview()` renders the static ACL-add template with the field values and redacts the Execution_Credentials to `***` (Req 7.2).
+5. The handler returns `{ preview }`; the frontend shows it in the terminal box and switches the button to "Execute Command" (Req 13.12).
+
+**Execute** (`POST /api/acl/execute`, Req 4.9, 4.13):
+6. The user clicks "Execute Command" and confirms in a dialog (Req 13.13).
+7. The handler parses `{operation:'ADD'} & AclAddSchema` — `correlationId`/`status` are server-controlled and absent from the schema (Req 11.4) — and calls `requirePermission(event, 'ACL_POLICIES_ADD')`.
+8. `AclService.execute('ADD', input, actor, ctx)` generates a `correlationId`, calls `N8N_Client.aclExecute('ADD', fieldPayload, correlationId)` (field payload only, not the preview string — Req 4.11), and awaits the result within `N8N_TIMEOUT_MS`.
+9. The service records one `ACL/ADD` audit log carrying the `correlationId`, the redacted `request_payload` and `command_payload`, the n8n `execution_payload`, and the device `response_payload`, with `status` = SUCCESS or FAILED (Req 4.9, 4.14, 8.5). Raw credentials never enter any payload (Req 4.14, 8.4).
+10. The handler returns an `OperationResult`; the frontend shows the raw device output and the SUCCESS/FAILED outcome (Req 13.14). On n8n error/timeout the audit log is FAILED and the client gets a safe error with no credentials (Req 4.13).
 
 ```mermaid
 sequenceDiagram
     participant U as Browser (ACL form)
-    participant M as Session Middleware
-    participant H as POST /api/acl handler
+    participant H as POST /api/acl/execute
     participant S as AclService
-    participant G as AclCommandGenerator
-    participant DB as PostgreSQL (tx)
+    participant N as N8N_Client
+    participant E as n8n → jump host → device
     participant A as AuditService
+    participant DB as PostgreSQL (audit_logs)
 
-    U->>H: POST /api/acl (cookie + body)
-    Note over U: client-side Zod (CreateAclSchema)
-    H->>M: (runs first) resolve auth
-    M-->>H: event.context.auth
-    H->>H: CreateAclSchema.parse(body)  [strips server fields]
-    H->>H: requirePermission(ACL_CREATE)  [401/403]
-    H->>S: create(input, actor)
-    S->>G: generate(domain)
-    G-->>S: generatedCommand (preview only)
-    S->>DB: BEGIN
-    S->>DB: INSERT acl_policies
-    S->>A: record(ACL_CREATED, tx)
-    A->>DB: INSERT audit_logs
-    alt any write fails
-        DB-->>S: error → ROLLBACK
-        S-->>H: throw
-    else success
-        S->>DB: COMMIT
-        S-->>H: AclResponse (mapped)
-    end
-    H-->>U: {success:true, data}
+    U->>U: preview (redacted) shown, user confirms
+    U->>H: POST /api/acl/execute (cookie + field payload)
+    H->>H: Zod parse (no correlationId/status) + requirePermission(ACL_POLICIES_ADD)
+    H->>S: execute('ADD', input, actor)
+    S->>S: generate correlationId
+    S->>N: aclExecute('ADD', fieldPayload, correlationId)
+    N->>E: POST webhook (API key + correlationId + fields)
+    E-->>N: { status, output|error, execution }
+    N-->>S: N8nResult
+    S->>A: record(ACL/ADD, redacted payloads, status)
+    A->>DB: INSERT audit_logs (correlationId)
+    S-->>H: OperationResult (no creds)
+    H-->>U: {success:true, data: OperationResult}
 ```
+
+The show flow is the same minus the preview/confirm steps: `POST /api/acl/show` → `requirePermission(ACL_POLICIES_SHOW)` → `N8N_Client.aclShow` → `ACL/SHOW` audit → raw output to the terminal box.
 
 ## Error Handling
 
@@ -940,17 +978,23 @@ Internal errors never leak SQL, stack traces, filesystem paths, or secrets to th
 
 **Validates: Requirements 3.7, 11.3, NFR Security 5**
 
-### Property 10: Request schemas strip Server_Controlled_Fields
+### Property 10: Request schemas strip server-controlled fields
 
-*For any* mutation payload that also includes Server_Controlled_Fields (`id`, `generatedCommand`, `createdBy`, `createdAt`, `updatedBy`, `updatedAt`), the parsed API Request value does not carry those client-supplied fields.
+*For any* API request payload that also includes server-controlled fields (`id`, `correlationId`, `createdAt`, or the audit `status`), the parsed value does not carry those client-supplied fields.
 
-**Validates: Requirements 4.12, 6.9, 11.4**
+**Validates: Requirements 11.4**
 
-### Property 11: Command generation is a deterministic preview
+### Property 11: Command preview redacts credentials and is display-only
 
-*For any* valid ACL or route domain object, the corresponding command generator returns a non-empty preview string and produces the same output on repeated calls for the same input, without executing anything against a device.
+*For any* valid ACL or route add/delete field payload, the rendered Command_Preview is a non-empty string in which the Execution_Credentials appear only as `***` (never in cleartext), and building the preview performs no n8n call and no device execution.
 
-**Validates: Requirements 4.11, 6.8, 7.3**
+**Validates: Requirements 4.8, 6.6, 7.2, 7.3, NFR Security 7**
+
+### Property 11b: Credentials never reach persistence or the client result
+
+*For any* ACL/route operation, the recorded Audit_Log (all fixed columns and all four JSONB payloads) and the returned `OperationResult` contain no cleartext Execution_Credentials — only `***` — and the same `correlationId` appears on the request to n8n and on the Audit_Log.
+
+**Validates: Requirements 4.14, 4.15, 6.11, 6.12, 8.4, 8.5, NFR Security 7**
 
 ### Property 12: hasPermission agrees with the resolved permission set
 
@@ -980,21 +1024,23 @@ Internal errors never leak SQL, stack traces, filesystem paths, or secrets to th
 
 Testing uses Vitest with a dual approach: **property-based tests** for universal input-varying behavior and **example/integration tests** for specific scenarios and wiring. Property tests run a minimum of 100 iterations and are tagged `Feature: netops-policy-manager, Property {n}: {text}`.
 
-### Unit tests (no DB)
+### Unit tests (no DB, no n8n)
 
 - **Network schemas** — Properties 1–8 (IPv4, CIDR, port, protocol, ACL cross-field, next hop, time, empty-string rejection).
-- **Command generators** — Property 11 (non-empty, deterministic preview).
+- **Command preview + redaction** — Property 11 (non-empty, credentials shown only as `***`, no side effects).
 - **RBAC helpers** — Property 12 (`hasPermission` vs the DB-resolved permission set).
-- **Mappers** — Properties 9 and 10 (response mappers strip secrets; request schemas strip server fields).
+- **Mappers/schemas** — Properties 9 and 10 (response mappers strip secrets; request schemas strip server-controlled fields).
 - **Error handler** — Properties 13 and 14 (Zod→fields, internal-error redaction).
 - **Pagination** — Property 15.
 
-### Integration-style tests (handlers with mocked repositories/services)
+### Integration-style tests (handlers with mocked repositories + mocked N8N_Client)
 
-- Auth 401 (unauthenticated) and 403 (missing permission) on protected endpoints.
-- Server-controlled field rejection at the handler boundary.
+- Auth 401 (unauthenticated) and 403 (missing permission) on protected endpoints, including `operation`-derived permission on preview/execute.
+- Server-controlled field rejection at the handler boundary (`correlationId`/`status` cannot be client-set).
 - `passwordHash` absent from user API responses.
-- Audit-on-create for ACL and route (audit insert invoked within the mutation transaction; audit failure rolls back the mutation).
+- Execute writes an Audit_Log with the `correlationId` and SUCCESS status when the mocked n8n returns success (ACL and route). — Property 11b.
+- Execute writes a FAILED Audit_Log and returns a safe error (no credentials) when the mocked n8n errors or times out.
+- No Execution_Credentials cleartext in any Audit_Log payload or `OperationResult`. — Property 11b.
 
 ### Required test cases from Requirement 17
 
@@ -1008,12 +1054,13 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 8. Reject an invalid time value (Req 17.8).
 9. Reject an unauthenticated request to a protected endpoint (Req 17.9).
 10. Reject a request lacking the required permission (Req 17.10).
-11. Confirm a client-supplied `generatedCommand` value is ignored or rejected (Req 17.11).
-12. Confirm a client-supplied `createdBy` value is ignored or rejected (Req 17.12).
+11. Confirm the Command_Preview redacts the Execution_Credentials to `***` (Req 17.11).
+12. Confirm the raw Execution_Credentials never appear in any Audit_Log or JSONB payload (Req 17.12).
 13. Confirm a password hash never appears in an API response (Req 17.13).
-14. Confirm ACL creation produces an audit entry (Req 17.14).
-15. Confirm route creation produces an audit entry (Req 17.15).
-16. The pipeline passes type checking, linting, the test suite, and a production build (Req 17.16).
+14. Confirm an ACL add/delete produces an Audit_Log carrying the correlation id (Req 17.14).
+15. Confirm a route add/delete produces an Audit_Log carrying the correlation id (Req 17.15).
+16. Confirm an unreachable-n8n / n8n-error outcome is a FAILED Audit_Log and a safe client error without credentials (Req 17.16).
+17. The pipeline passes type checking, linting, the test suite, and a production build (Req 17.17).
 
 ## Security and Deployment
 
@@ -1023,14 +1070,18 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 - **TOTP secrets** stored only encrypted (AES-256-GCM); never returned to the client except within the enrollment otpauth URI (NFR Sec 3).
 - **Sessions** store only the token hash; the raw token lives only in the cookie (Req 1.7, NFR Sec 2). A session is created only after the second factor succeeds.
 - **Cookie flags**: `HttpOnly`, `SameSite=Lax`, `Path=/`, with `Secure` added when `NODE_ENV==='production'` (Req 1.7, 1.8).
-- **Server-authoritative** auth/authorization (Req 2.8, NFR Sec 3); mass-assignment prevented by request schemas (Req 11.4, NFR Sec 4).
-- **Secret exclusion** from responses, audit entries, and the health endpoint (Req 8.3, 12.4, 16.5, NFR Sec 5).
+- **Server-authoritative** auth/authorization (Req 2.8, NFR Sec 4); mass-assignment prevented by request schemas (Req 11.4, NFR Sec 5).
+- **Execution credentials** are forwarded to n8n over the webhook but never persisted and never returned to the client; they appear only as `***` in previews, `OperationResult`, and every audit payload (Req 7, 8.4, NFR Sec 7).
+- **n8n API key** is held server-side (`N8N_API_KEY`), sent to n8n on every call, and never exposed via `runtimeConfig.public` or any response (Req 14.4, NFR Sec 8). n8n calls use HTTPS and enforce `N8N_TIMEOUT_MS`.
+- **Device output** returned by n8n is treated as untrusted data for display/parsing, not as instructions (Req 7.7).
+- **Secret exclusion** from responses, audit entries, and the health endpoint (Req 8.4, 12.4, 16.5, NFR Sec 6).
 
 ### Configuration (Req 14)
 
-- `.env.example` provides `NODE_ENV`, `DATABASE_URL`, `SESSION_SECRET` placeholders with no real credentials (Req 14.1).
-- A Nitro startup plugin validates `process.env` against `EnvSchema`; missing/invalid values halt startup (Req 14.2, 14.3).
-- The app never provisions a PostgreSQL database (Req 14.4), never auto-migrates at startup (Req 14.5), and never falls back to SQLite or any embedded DB (Req 14.6).
+- `.env.example` provides placeholders (no real credentials) for `NODE_ENV`, `DATABASE_URL`, `SESSION_SECRET`, `MFA_ENCRYPTION_KEY`, the AD variables, and the n8n variables `N8N_BASE_URL` / `N8N_API_KEY` / `N8N_TIMEOUT_MS` (Req 14.1).
+- A Nitro startup plugin validates `process.env` against `EnvSchema`; missing/invalid values halt startup, including the n8n variables required for ACL/route execution (Req 14.2, 14.3).
+- The n8n API key stays server-side only (Req 14.4).
+- The app never provisions a PostgreSQL database (Req 14.5), never auto-migrates at startup (Req 14.6), and never falls back to SQLite or any embedded DB (Req 14.7).
 
 ### Migration and Seeding (Req 15)
 

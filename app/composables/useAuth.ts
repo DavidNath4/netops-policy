@@ -9,6 +9,7 @@ export interface AuthUser {
   userId: string
   email: string
   displayName: string
+  username: string | null
   authProvider: 'LOCAL' | 'AD'
   isActive: boolean
   roleCode: string | null
