@@ -9,6 +9,7 @@ const props = withDefaults(defineProps<{
   /** Marks the field as required (adds an asterisk and aria-required). */
   required?: boolean
 }>(), {
+  error: undefined,
   required: false,
 })
 

@@ -64,9 +64,9 @@ async function onSubmit() {
 </script>
 
 <template>
-  <!-- Figma "01 Login": #F5F7FA canvas, left branding + right 400x500 card,
-       centered together on the page. -->
   <div class="flex min-h-screen items-center justify-center bg-surface px-6">
+    <!-- Figma "01 Login": #F5F7FA canvas, left branding + right 400x500 card,
+         centered together on the page. -->
     <div
       class="flex w-full max-w-[960px] flex-col items-center gap-12 lg:flex-row lg:items-center lg:justify-between lg:gap-16"
     >

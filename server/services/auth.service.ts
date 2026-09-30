@@ -1,5 +1,4 @@
-import type { UserResponse } from '#shared/schemas/user.schema'
-import type { CreateLocalUserInput } from '#shared/schemas/user.schema'
+import type { CreateLocalUserInput, UserResponse } from '#shared/schemas/user.schema'
 import type { MfaDeviceResponse } from '#shared/schemas/mfa.schema'
 import { MFA_DEVICE_LIMIT } from '#shared/schemas/mfa.schema'
 
@@ -16,7 +15,6 @@ import {
   verifyTotp,
 } from './mfa.service'
 import {
-  AdAccountDisabledError,
   AdCredentialsError,
   authenticateAd,
 } from '../auth/ad/directory'

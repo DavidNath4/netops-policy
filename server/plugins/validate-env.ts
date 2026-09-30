@@ -27,7 +27,7 @@ export default defineNitroPlugin(async () => {
   catch (err) {
     console.error('[db] Failed to connect to PostgreSQL:')
     console.error(err instanceof Error ? err.message : err)
-    throw new Error('Database connection failed at startup - see error above.')
+    throw new Error('Database connection failed at startup - see error above.', { cause: err })
   }
   finally {
     await client.end()

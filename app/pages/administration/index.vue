@@ -331,7 +331,7 @@ function rowMenuItems(user: AdminUserResponse) {
 // Helpers
 // ---------------------------------------------------------------------------
 function clearErrors(target: Record<string, string>) {
-  for (const key of Object.keys(target)) delete target[key]
+  for (const key of Object.keys(target)) Reflect.deleteProperty(target, key)
 }
 
 function errorMessage(err: unknown, fallback: string): string {

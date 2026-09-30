@@ -7,6 +7,7 @@ withDefaults(defineProps<{
   /** Lucide icon name for the illustration. */
   icon?: string
 }>(), {
+  description: undefined,
   icon: 'i-lucide-inbox',
 })
 
