@@ -375,6 +375,11 @@ export const sessions = pgTable('sessions', {
   lastUsedAt: timestamp('last_used_at', { withTimezone: true }),           // Req 1.9
   sourceIp: varchar('source_ip', { length: 64 }),
   userAgent: varchar('user_agent', { length: 512 }),
+  // Device_Session_Credentials for read operations (n8n-integration Req 11).
+  // AES-256-GCM ciphertext of { username, password } (MFA_ENCRYPTION_KEY); never
+  // cleartext; removed on logout/expiry (row deleted) or manual clear.
+  deviceCredEncrypted: text('device_cred_encrypted'),
+  deviceCredExpiresAt: timestamp('device_cred_expires_at', { withTimezone: true }), // TTL, default 30 min
 }, (t) => [
   uniqueIndex('sessions_token_hash_uidx').on(t.tokenHash),
   index('sessions_user_id_idx').on(t.userId),
@@ -801,10 +806,14 @@ The Command_Preview is built and redacted **on the server** and returned for dis
 | PATCH | `/api/users/:id/role` | ADMINISTRATION_MANAGE | `ChangeUserRoleSchema` | `UserResponse` (Req 3.4) |
 | PATCH | `/api/users/:id/status` | ADMINISTRATION_MANAGE | `{status}` | `UserResponse` (Req 3.5) |
 | POST | `/api/users/:id/reset-password` | ADMINISTRATION_MANAGE | `ResetPasswordSchema` | `{}` (Req 3.6) |
-| POST | `/api/acl/show` | ACL_POLICIES_SHOW | `AclShowSchema` | `OperationResult` (raw output) (Req 4.1, 4.2) |
+| POST | `/api/session/device-credentials` | valid session | `{ username, password }` | `{ set: true }` (encrypt + store on session, reset TTL — Req 11) |
+| GET | `/api/session/device-credentials` | valid session | — | `{ set, username?, expiresAt? }` (status only, no password) |
+| GET | `/api/session/device-credentials/reveal` | valid session (owner) | — | `{ username, password }` (eye-toggle; owner only) |
+| DELETE | `/api/session/device-credentials` | valid session | — | `{ set: false }` (clear immediately) |
+| POST | `/api/acl/show` | ACL_POLICIES_SHOW | `AclShowSchema` (required search value; creds auto-filled from session) | `OperationResult` (search result) (Req 4.1–4.3) |
 | POST | `/api/acl/preview` | ACL_POLICIES_ADD or ACL_POLICIES_DELETE | `AclPreviewSchema` | `{ preview: string }` (redacted) (Req 4.8) |
 | POST | `/api/acl/execute` | ACL_POLICIES_ADD (op=ADD) / ACL_POLICIES_DELETE (op=DELETE) | `{operation} & AclAddSchema \| AclDeleteSchema` | `OperationResult` (Req 4.9, 4.10) |
-| POST | `/api/routes/show` | ROUTES_SHOW | `RouteShowSchema` | `OperationResult` (raw output) (Req 6.1, 6.2) |
+| POST | `/api/routes/show` | ROUTES_SHOW | `RouteShowSchema` (required search value; creds auto-filled from session) | `OperationResult` (search result) (Req 6.1–6.3) |
 | POST | `/api/routes/preview` | ROUTES_ADD or ROUTES_DELETE | `RoutePreviewSchema` | `{ preview: string }` (redacted) (Req 6.6) |
 | POST | `/api/routes/execute` | ROUTES_ADD (op=ADD) / ROUTES_DELETE (op=DELETE) | `{operation} & RouteAddSchema \| RouteDeleteSchema` | `OperationResult` (Req 6.7, 6.8) |
 | GET | `/api/audit` | valid session | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.8) |
@@ -813,7 +822,8 @@ The Command_Preview is built and redacted **on the server** and returned for dis
 | GET | `/api/dashboard/summary` | valid session | — | summary object from `audit_logs` (Req 9) |
 
 Notes on the ACL/route endpoints:
-- All ACL/route endpoints are `POST` (including show), because they carry the Execution_Credentials in the body and must never place them in a URL/query.
+- All ACL/route endpoints are `POST` (including show): add/delete carry the Execution_Credentials in the body (never in a URL/query); show carries only a filter and the server auto-fills credentials from the Device_Session_Credentials (n8n-integration Req 11).
+- Show requires valid Device_Session_Credentials; without them the endpoint returns `DEVICE_CREDENTIALS_REQUIRED` (400).
 - The permission for `preview` and `execute` is resolved from the `operation` field: `ADD` requires `*_ADD`, `DELETE` requires `*_DELETE`. `show` requires `*_SHOW`.
 - There are no ACL/route list/get-by-id endpoints — the app has no local ACL/route store; the Log Trail (`/api/audit`) is the history.
 - `preview` performs no execution and writes no audit entry; only `show` and `execute` call n8n and record an audit log.
@@ -854,8 +864,10 @@ export const fail = (code: ErrorCode, message: string, fields?: Record<string,st
 
 export type ErrorCode =
   | 'VALIDATION_ERROR' | 'UNAUTHENTICATED' | 'FORBIDDEN'
-  | 'NOT_FOUND' | 'CONFLICT' | 'INTERNAL_ERROR';
+  | 'NOT_FOUND' | 'CONFLICT' | 'DEVICE_CREDENTIALS_REQUIRED' | 'INTERNAL_ERROR';
 ```
+
+`DEVICE_CREDENTIALS_REQUIRED` (400) is returned when a read operation (ACL/Route show/list/search) is attempted with no valid Device_Session_Credentials; the client prompts the engineer to enter them (n8n-integration Req 11).
 
 A central error handler (Nitro `error` hook + per-handler `try/catch` wrapper) maps:
 - `ZodError` → `VALIDATION_ERROR` (400) with `fields` built from `issue.path` → `issue.message` (Req 12.3).

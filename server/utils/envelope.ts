@@ -26,6 +26,7 @@ export type ErrorCode =
   | 'CONFLICT'
   | 'AD_UNREACHABLE'
   | 'ACCOUNT_DISABLED'
+  | 'DEVICE_CREDENTIALS_REQUIRED'
   | 'INTERNAL_ERROR'
 
 export interface OkEnvelope<T> {

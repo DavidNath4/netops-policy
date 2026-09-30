@@ -11,16 +11,18 @@ import {
 // Route operation request payloads (Zod, runtime). Field payloads sent to n8n —
 // not DB rows and not rendered command strings. Mirrors the ACL schemas.
 
-/** ROUTE SHOW — read-only, runs immediately. A single filter value. */
-export const RouteShowSchema = z
-  .object({
-    filter: z
-      .string()
-      .trim()
-      .min(1, 'Filter is required')
-      .max(256, 'Filter must be at most 256 characters'),
-  })
-  .merge(ExecCredentialsSchema)
+/**
+ * ROUTE SHOW — search-only, read-only, runs immediately. Required search value
+ * (an IP address); credentials are auto-filled from the caller's Device Session
+ * Credentials, not sent in the body.
+ */
+export const RouteShowSchema = z.object({
+  search: z
+    .string()
+    .trim()
+    .min(1, 'Search value is required')
+    .max(256, 'Search value must be at most 256 characters'),
+})
 export type RouteShowInput = z.infer<typeof RouteShowSchema>
 
 /** Fields collected for a ROUTE ADD (before credentials are merged). */

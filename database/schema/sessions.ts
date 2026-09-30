@@ -30,6 +30,12 @@ export const sessions = pgTable(
     lastUsedAt: timestamp('last_used_at', { withTimezone: true }),
     sourceIp: varchar('source_ip', { length: 64 }),
     userAgent: varchar('user_agent', { length: 512 }),
+    // Device Session Credentials for read (show/search) operations.
+    // AES-256-GCM ciphertext of the engineer's device username/password
+    // (MFA_ENCRYPTION_KEY). NEVER stored in cleartext, never audited/logged.
+    // Removed with the row on logout/expiry, or cleared manually. Short TTL.
+    deviceCredEncrypted: text('device_cred_encrypted'),
+    deviceCredExpiresAt: timestamp('device_cred_expires_at', { withTimezone: true }),
   },
   table => [
     uniqueIndex('sessions_token_hash_uidx').on(table.tokenHash),

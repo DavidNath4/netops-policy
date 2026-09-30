@@ -38,6 +38,16 @@ export const ExecCredentialsSchema = z.object({
 export type ExecCredentials = z.infer<typeof ExecCredentialsSchema>
 
 /**
+ * Body for setting the Device Session Credentials (read-path convenience). Held
+ * encrypted on the session row; see the n8n Integration spec (Req 11).
+ */
+export const DeviceCredentialsSchema = z.object({
+  username: z.string().trim().min(1, 'Username is required').max(128),
+  password: z.string().min(1, 'Password is required').max(256),
+})
+export type DeviceCredentialsInput = z.infer<typeof DeviceCredentialsSchema>
+
+/**
  * n8n execution metadata (best-effort). Stored in audit.execution_payload.
  * All fields optional so a partial/missing block never fails the audit write.
  */
@@ -57,6 +67,9 @@ export type N8nExecutionMeta = z.infer<typeof N8nExecutionMetaSchema>
  */
 export const N8nResultSchema = z.object({
   status: OutcomeSchema,
+  message: z.string().nullable().optional(),
+  total: z.number().nullable().optional(),
+  items: z.array(z.unknown()).nullable().optional(),
   output: z.string().nullable().optional(),
   error: z.string().nullable().optional(),
   device: z.string().optional(),
@@ -67,11 +80,16 @@ export type N8nResult = z.infer<typeof N8nResultSchema>
 
 /**
  * Client-facing result of a show/execute. Excludes all secrets; carries the
- * correlation id so the UI/audit can be tied together.
+ * correlation id so the UI/audit can be tied together. `items`/`total` carry a
+ * structured result (e.g. ACL show rows) for table rendering; `output` is the
+ * raw text fallback; `message` is n8n's human message.
  */
 export const OperationResultSchema = z.object({
   correlationId: CorrelationIdSchema,
   status: OutcomeSchema,
+  message: z.string().nullable(),
+  total: z.number().nullable(),
+  items: z.array(z.unknown()).nullable(),
   output: z.string().nullable(),
   error: z.string().nullable(),
 })

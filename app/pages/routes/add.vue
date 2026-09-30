@@ -1,105 +1,100 @@
 <script setup lang="ts">
-// Add Route form (mock data via useApi()). Wired to live /api/routes on
-// task 13.2. Collects the route fields, shows a client-side command preview,
-// and creates the route then returns to the list.
-// _Requirements: 6.1, 6.2, 6.3, 6.8, 13.1, 13.2, 13.3, 13.4_
-import type { CreateRouteInput, PolicyStatus } from '~/utils/api-types'
+// Add Route — Generate (server preview, redacted) → Execute (via n8n) flow.
+// Mirror of the ACL add page. Requirements: 6.1, 6.6, 6.7, 13.1–13.4, 13.12–13.15.
+import type { RoutePreviewInput } from '#shared/schemas/route.schema'
+import type { OperationResult } from '#shared/schemas/n8n.schema'
 
 definePageMeta({ middleware: 'permission', permission: 'ROUTES_ADD' })
 
 const api = useApi()
 
-interface RouteForm {
-  name: string
-  source: string
-  destination: string
-  nextHop: string
-  policy: string
-  timeStart: string
-  timeEnd: string
-  changeTicket: string
-}
-
-const form = reactive<RouteForm>({
+const form = reactive({
   name: '',
-  source: '',
   destination: '',
+  source: '',
   nextHop: '',
   policy: '',
-  timeStart: '',
-  timeEnd: '',
+  timeRange: '',
   changeTicket: '',
+  execUsername: '',
+  execPassword: '',
 })
 
-const errors = reactive<Record<string, string | undefined>>({})
-const submitting = ref(false)
-const submitError = ref<string | null>(null)
-
-// NOTE: CLIENT-SIDE PREVIEW ONLY. Per Requirement 6.8 the authoritative command
-// is SERVER-GENERATED and returned by the API (wired in task 13.2); the client
-// never sets generatedCommand. This preview just shows the likely command shape
-// while the operator fills in the form.
-const commandPreview = computed(() => {
-  const dest = form.destination.trim()
-  const hop = form.nextHop.trim()
-  if (!dest || !hop) return '# Enter a destination and next hop to preview the command'
-  let cmd = `ip route ${dest} ${hop}`
-  if (form.policy.trim()) cmd += `\npolicy ${form.policy.trim()}`
-  if (form.timeStart && form.timeEnd) {
-    cmd += `\ntime-range ${form.timeStart} to ${form.timeEnd}`
-  }
-  return cmd
-})
-
-/** Validate required fields; returns true when the form is valid. */
-function validate(): boolean {
-  for (const key of Object.keys(errors)) delete errors[key]
-
-  if (!form.name.trim()) errors.name = 'Route name is required.'
-  if (!form.destination.trim()) errors.destination = 'Destination is required.'
-  if (!form.nextHop.trim()) errors.nextHop = 'Next hop is required.'
-
-  return Object.keys(errors).length === 0
+function buildPayload(): RoutePreviewInput {
+  return {
+    operation: 'ADD',
+    name: form.name.trim(),
+    destination: form.destination.trim(),
+    source: form.source.trim() || undefined,
+    nextHop: form.nextHop.trim(),
+    policy: form.policy.trim() || undefined,
+    timeRange: form.timeRange.trim() || undefined,
+    changeTicket: form.changeTicket.trim() || undefined,
+    execUsername: form.execUsername,
+    execPassword: form.execPassword,
+  } as RoutePreviewInput
 }
 
-async function submit() {
-  submitError.value = null
-  if (!validate()) return
+const preview = ref<string | null>(null)
+const generating = ref(false)
+const executing = ref(false)
+const confirmOpen = ref(false)
+const errorMsg = ref<string | null>(null)
+const result = ref<OperationResult | null>(null)
 
-  submitting.value = true
+function toMessage(e: unknown, fallback: string): string {
+  const msg = (e as { data?: { error?: { message?: string } } })?.data?.error?.message
+  if (msg) return msg
+  return e instanceof Error ? e.message : fallback
+}
+
+watch(form, () => {
+  preview.value = null
+  result.value = null
+})
+
+async function onGenerate() {
+  errorMsg.value = null
+  result.value = null
+  generating.value = true
   try {
-    // generatedCommand / createdBy / status etc. are Server_Controlled_Fields
-    // and are intentionally excluded from CreateRouteInput.
-    const input: CreateRouteInput = {
-      name: form.name.trim(),
-      destination: form.destination.trim(),
-      source: form.source.trim() || undefined,
-      nextHop: form.nextHop.trim(),
-      policy: form.policy.trim() || undefined,
-      timeStart: form.timeStart.trim() || undefined,
-      timeEnd: form.timeEnd.trim() || undefined,
-      changeTicket: form.changeTicket.trim() || undefined,
-      status: 'DRAFT' as PolicyStatus,
-    }
-    await api.routes.create(input)
-    await navigateTo('/routes')
+    const { preview: text } = await api.routeOps.preview(buildPayload())
+    preview.value = text
   }
   catch (e) {
-    submitError.value = e instanceof Error ? e.message : 'Failed to add route.'
+    errorMsg.value = toMessage(e, 'Failed to generate the command preview.')
   }
   finally {
-    submitting.value = false
+    generating.value = false
   }
 }
 
-// Shared input classes (white input, border-line, rounded-6px).
+async function onExecuteConfirmed() {
+  errorMsg.value = null
+  executing.value = true
+  try {
+    result.value = await api.routeOps.execute(buildPayload())
+    confirmOpen.value = false
+  }
+  catch (e) {
+    confirmOpen.value = false
+    errorMsg.value = toMessage(e, 'Execution failed.')
+  }
+  finally {
+    executing.value = false
+  }
+}
+
 const inputClass
-  = 'h-[38px] w-full rounded-md border border-line bg-panel px-3 text-xs text-ink outline-none focus:border-brand'
+  = 'h-[38px] w-full rounded-md border border-line bg-panel px-3 text-xs text-ink outline-none focus:border-brand disabled:cursor-not-allowed disabled:bg-surface disabled:text-muted'
 </script>
 
 <template>
   <div class="flex flex-col gap-6">
-    <PageHeader title="Add Route" description="Define a route with policy and traceability.">
+    <PageHeader
+      title="Add Route"
+      description="Fill the fields, generate the command, then execute via automation."
+    >
       <template #actions>
         <NuxtLink
           to="/routes"
@@ -112,133 +107,124 @@ const inputClass
     </PageHeader>
 
     <UAlert
-      v-if="submitError"
+      v-if="errorMsg"
       color="error"
       variant="soft"
       icon="i-lucide-circle-alert"
-      :description="submitError"
+      :description="errorMsg"
     />
 
-    <form class="flex flex-col gap-6" @submit.prevent="submit">
-      <!-- 2-column field grid -->
+    <form class="flex flex-col gap-6" @submit.prevent="onGenerate">
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <FormField label="Route" name="name" :error="errors.name" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.name"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. route-to-dc2"
-              :class="inputClass"
-            >
+        <FormField label="Name" name="name" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.name" type="text" placeholder="e.g. to-dc2" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Destination (CIDR)" name="destination" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.destination" type="text" placeholder="e.g. 10.200.0.0/16" :class="inputClass">
+          </template>
+        </FormField>
+
+        <FormField label="Next Hop" name="nextHop" required>
+          <template #default="{ id }">
+            <input :id="id" v-model="form.nextHop" type="text" placeholder="e.g. 10.71.34.1" :class="inputClass">
           </template>
         </FormField>
 
         <FormField label="Source" name="source">
           <template #default="{ id }">
-            <input
-              :id="id"
-              v-model="form.source"
-              type="text"
-              placeholder="e.g. 10.0.0.0/24 (optional)"
-              :class="inputClass"
-            >
-          </template>
-        </FormField>
-
-        <FormField label="Destination" name="destination" :error="errors.destination" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.destination"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. 192.168.10.0/24"
-              :class="inputClass"
-            >
-          </template>
-        </FormField>
-
-        <FormField label="Next Hop" name="nextHop" :error="errors.nextHop" required>
-          <template #default="{ id, invalid, describedBy }">
-            <input
-              :id="id"
-              v-model="form.nextHop"
-              type="text"
-              :aria-invalid="invalid"
-              :aria-describedby="describedBy"
-              placeholder="e.g. 10.0.0.1"
-              :class="inputClass"
-            >
+            <input :id="id" v-model="form.source" type="text" placeholder="optional" :class="inputClass">
           </template>
         </FormField>
 
         <FormField label="Policy" name="policy">
           <template #default="{ id }">
-            <input
-              :id="id"
-              v-model="form.policy"
-              type="text"
-              placeholder="e.g. default (optional)"
-              :class="inputClass"
-            >
+            <input :id="id" v-model="form.policy" type="text" placeholder="optional" :class="inputClass">
           </template>
         </FormField>
 
-        <FormField label="Ticket" name="changeTicket">
+        <FormField label="Time Range" name="timeRange">
           <template #default="{ id }">
-            <input
-              :id="id"
-              v-model="form.changeTicket"
-              type="text"
-              placeholder="e.g. CHG-00123 (optional)"
-              :class="inputClass"
-            >
+            <input :id="id" v-model="form.timeRange" type="text" placeholder="e.g. 31-May-26" :class="inputClass">
           </template>
         </FormField>
 
-        <FormField label="Start Time" name="timeStart">
+        <FormField label="Ticket Change" name="changeTicket">
           <template #default="{ id }">
-            <input :id="id" v-model="form.timeStart" type="time" :class="inputClass">
-          </template>
-        </FormField>
-
-        <FormField label="End Time" name="timeEnd">
-          <template #default="{ id }">
-            <input :id="id" v-model="form.timeEnd" type="time" :class="inputClass">
+            <input :id="id" v-model="form.changeTicket" type="text" placeholder="e.g. CHG-123456" :class="inputClass">
           </template>
         </FormField>
       </div>
 
-      <!-- Command Result terminal -->
-      <div class="flex flex-col gap-3">
-        <h2 class="text-base font-semibold text-ink">Command Result</h2>
-        <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre class="whitespace-pre-wrap break-all">{{ commandPreview }}</pre>
-        </div>
-        <!-- Req 6.8: the authoritative command is generated by the server on save. -->
-        <p class="text-[10px] text-muted">
-          Preview only. The authoritative command is generated by the server on save.
+      <div class="rounded-lg border border-line bg-panel p-4">
+        <h2 class="mb-3 text-sm font-semibold text-ink">Execution Credentials</h2>
+        <p class="mb-3 text-[11px] text-muted">
+          Your device login, used only to run this command. Shown as *** in the preview and never stored.
         </p>
+        <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+          <FormField label="Username" name="execUsername" required>
+            <template #default="{ id }">
+              <input :id="id" v-model="form.execUsername" type="text" autocomplete="off" :class="inputClass">
+            </template>
+          </FormField>
+          <FormField label="Password" name="execPassword" required>
+            <template #default="{ id }">
+              <input :id="id" v-model="form.execPassword" type="password" autocomplete="off" :class="inputClass">
+            </template>
+          </FormField>
+        </div>
       </div>
 
-      <div class="flex justify-end">
-        <button
-          type="submit"
-          :disabled="submitting"
-          class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
-        >
-          <UIcon
-            :name="submitting ? 'i-lucide-loader-circle' : 'i-lucide-check'"
-            class="size-4"
-            :class="{ 'animate-spin': submitting }"
-          />
-          Validate &amp; Add Route
-        </button>
+      <div class="flex flex-col gap-3">
+        <h2 class="text-base font-semibold text-ink">Generated Command</h2>
+        <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
+          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
+        </div>
+
+        <div v-if="result" class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+          <p :class="result.status === 'SUCCESS' ? 'text-ok' : 'text-bad'">
+            {{ result.status === 'SUCCESS' ? '✓ Execution succeeded' : '✗ Execution failed' }}
+          </p>
+          <pre v-if="result.output" class="mt-1 whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
+          <pre v-else-if="result.error" class="mt-1 whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+        </div>
+
+        <div class="flex justify-end gap-2">
+          <button
+            v-if="!preview"
+            type="submit"
+            :disabled="generating"
+            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
+          >
+            <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />
+            Generate
+          </button>
+          <button
+            v-else
+            type="button"
+            :disabled="executing"
+            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
+            @click="confirmOpen = true"
+          >
+            <UIcon name="i-lucide-play" class="size-4" />
+            Execute Command
+          </button>
+        </div>
       </div>
     </form>
+
+    <ConfirmDialog
+      v-model="confirmOpen"
+      title="Execute route command?"
+      message="This will run the previewed command on the target device via automation. This action changes device configuration."
+      confirm-label="Execute"
+      confirm-color="primary"
+      :loading="executing"
+      @confirm="onExecuteConfirmed"
+    />
   </div>
 </template>

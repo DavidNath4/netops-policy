@@ -13,7 +13,7 @@
 // One role per user (roleCode/roleName from the roles table); email is the
 // identifier; isActive is the status. Every mutating control is gated by
 // ADMINISTRATION_MANAGE; the page/list needs ADMINISTRATION_SHOW.
-import type { RoleOption, UserResponse } from '~/utils/api-types'
+import type { AdminUserResponse, RoleOption } from '~/utils/api-types'
 
 definePageMeta({ middleware: 'permission', permission: 'ADMINISTRATION_SHOW' })
 
@@ -28,7 +28,7 @@ const canManage = computed(() => can('ADMINISTRATION_MANAGE'))
 // ---------------------------------------------------------------------------
 const ITEMS_PER_PAGE = 20
 
-const rows = ref<UserResponse[]>([])
+const rows = ref<AdminUserResponse[]>([])
 const total = ref(0)
 const page = ref(1)
 const pending = ref(true)
@@ -71,11 +71,11 @@ onMounted(loadRoles)
 
 const defaultRoleCode = computed(() => roleOptions.value[0]?.value ?? '')
 
-function roleLabel(user: UserResponse): string {
+function roleLabel(user: AdminUserResponse): string {
   return user.roleName ?? user.roleCode ?? '—'
 }
 
-function statusOf(user: UserResponse): string {
+function statusOf(user: AdminUserResponse): string {
   return user.isActive ? 'ACTIVE' : 'DISABLED'
 }
 
@@ -140,11 +140,11 @@ async function submitAdd() {
 // ---------------------------------------------------------------------------
 const editOpen = ref(false)
 const editSubmitting = ref(false)
-const editTarget = ref<UserResponse | null>(null)
+const editTarget = ref<AdminUserResponse | null>(null)
 const editForm = reactive({ displayName: '' })
 const editErrors = reactive<Record<string, string>>({})
 
-function openEdit(user: UserResponse) {
+function openEdit(user: AdminUserResponse) {
   editTarget.value = user
   editForm.displayName = user.displayName
   clearErrors(editErrors)
@@ -179,10 +179,10 @@ async function submitEdit() {
 // ---------------------------------------------------------------------------
 const roleOpen = ref(false)
 const roleSubmitting = ref(false)
-const roleTarget = ref<UserResponse | null>(null)
+const roleTarget = ref<AdminUserResponse | null>(null)
 const roleForm = reactive({ roleCode: '' })
 
-function openChangeRole(user: UserResponse) {
+function openChangeRole(user: AdminUserResponse) {
   roleTarget.value = user
   roleForm.roleCode = user.roleCode ?? defaultRoleCode.value
   roleOpen.value = true
@@ -219,9 +219,9 @@ async function submitChangeRole() {
 // ---------------------------------------------------------------------------
 const disableConfirmOpen = ref(false)
 const statusSubmitting = ref(false)
-const statusTarget = ref<UserResponse | null>(null)
+const statusTarget = ref<AdminUserResponse | null>(null)
 
-async function setStatus(user: UserResponse, isActive: boolean) {
+async function setStatus(user: AdminUserResponse, isActive: boolean) {
   statusSubmitting.value = true
   try {
     await users.setStatus(user.userId, isActive)
@@ -236,7 +236,7 @@ async function setStatus(user: UserResponse, isActive: boolean) {
   }
 }
 
-function onToggleStatus(user: UserResponse) {
+function onToggleStatus(user: AdminUserResponse) {
   if (user.isActive) {
     // Disabling is destructive -> confirm first.
     statusTarget.value = user
@@ -260,11 +260,11 @@ async function confirmDisable() {
 const resetConfirmOpen = ref(false)
 const resetFormOpen = ref(false)
 const resetSubmitting = ref(false)
-const resetTarget = ref<UserResponse | null>(null)
+const resetTarget = ref<AdminUserResponse | null>(null)
 const resetForm = reactive({ password: '' })
 const resetErrors = reactive<Record<string, string>>({})
 
-function openResetPassword(user: UserResponse) {
+function openResetPassword(user: AdminUserResponse) {
   resetTarget.value = user
   resetConfirmOpen.value = true
 }
@@ -305,7 +305,7 @@ async function submitReset() {
 // ---------------------------------------------------------------------------
 // Row action menu (only when the user can manage)
 // ---------------------------------------------------------------------------
-function rowMenuItems(user: UserResponse) {
+function rowMenuItems(user: AdminUserResponse) {
   return [
     [
       {

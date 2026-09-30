@@ -121,10 +121,22 @@ The app sends the operator's validated fields plus `correlationId` and the execu
 }
 ```
 
-**ACL SHOW**
+**ACL SHOW** — confirmed contract (`POST <base>/acl/show`). Body is exactly:
 ```json
-{ "module": "ACL", "action": "SHOW", "correlationId": "3f1c…", "filter": "10.131.10.111", "execUsername": "engineer1", "execPassword": "…" }
+{ "user": "Busisa.Bhp", "pass": "…", "source": "10.71.34.107" }
 ```
+No `module`/`action`/`correlationId` in the body (the URL is per-operation; the
+correlation id is sent as the `x-correlation-id` header for tracing). Response:
+```json
+{ "success": true, "total": 2, "data": [ { "raw": "access-list AWS-LAB extended permit ip host 10.71.34.107 host 10.100.100.100",
+  "aclName": "AWS-LAB", "action": "permit", "protocol": "ip",
+  "source": { "type": "host", "value": "10.71.34.107" },
+  "destination": { "type": "host", "value": "10.100.100.100" }, "service": null } ], "message": "ACL found" }
+```
+The client maps `success`→status, `data[]`→`items` (rendered as a table:
+ACL Name / Action / Protocol / Source / Destination / Service), `total`, `message`.
+The device credentials come from the Device Session Credentials (`user`/`pass`),
+not the request body from the browser.
 
 **ROUTE ADD**
 ```json
@@ -233,11 +245,67 @@ Env consumed by this integration (validated by the main spec's `EnvSchema`):
 
 | Var | Purpose |
 |---|---|
-| `N8N_BASE_URL` | Base URL for the n8n webhook(s). Per-operation paths derive from it, or a single webhook + `{module,action}` discriminator is used. |
-| `N8N_API_KEY` | Shared secret sent on every call; server-side only, never in `runtimeConfig.public` or any response. |
-| `N8N_TIMEOUT_MS` | Per-call timeout (default 15000). |
+| `N8N_BASE_URL` | Base of the n8n webhooks. The client appends `/<module>/<action>` (lowercase), e.g. `<base>/acl/show`, `<base>/route/add`. A trailing slash on the base is handled. |
+| `N8N_API_KEY` | Shared secret sent on every call in the `X-NetOps-Internal-Key` header; server-side only, never in `runtimeConfig.public` or any response. |
+| `N8N_TIMEOUT_MS` | Per-call timeout (default 15000; deployment may raise it, e.g. 35000, for slower device operations). |
 
-`.env.example` carries placeholders for all three (Req 10.3). Startup halts if a required n8n var is missing/invalid (Req 10.2).
+The six per-operation endpoints are: `POST <base>/acl/show`, `/acl/add`, `/acl/delete`, `/route/show`, `/route/add`, `/route/delete`. `.env.example` carries placeholders (Req 10.3). Startup halts if a required n8n var is missing/invalid (Req 10.2).
+
+## Device Session Credentials (read operations) (Req 11)
+
+Read operations (ACL/Route show/list/search/detail) call n8n often, so the engineer sets their device credentials once per session and the backend auto-fills them. They are stored **encrypted on the session row**, short-lived, owner-scoped, and never audited.
+
+### Storage
+
+One column is added to `sessions` (see main spec):
+
+- `device_cred_encrypted` (text, nullable) — the AES-256-GCM ciphertext of `{ username, password }`, using the existing `MFA_ENCRYPTION_KEY` and the same crypto helper as TOTP secrets. No cleartext is ever stored.
+
+The credentials live for the lifetime of the login session — there is **no separate TTL**. Living on the `sessions` row means logout / session deletion / session expiry remove them automatically (Req 11.9). (A `device_cred_expires_at` column exists from the initial migration but is unused; it is left in place to avoid a needless migration and may be dropped later.)
+
+### Validation on set
+
+Setting credentials first validates them against n8n so only working credentials are stored:
+
+- `POST <N8N_BASE_URL>/user/validate` with header `X-NetOps-Internal-Key`, body `{ user, pass }`.
+- Response `{ success: boolean, message: string }`. Only `success: true` proceeds to encrypt + store; otherwise the set is rejected with the message and nothing is stored (Req 11.1, 11.2, 11.13).
+- Validation happens **once, at set time** — reads do not re-validate (Req 11.5).
+
+### Service (`server/services/device-credential.service.ts`)
+
+```typescript
+setDeviceCredentials(db, event, { username, password })   // (validated by the handler first) encrypt + store
+getDeviceCredentials(db, event): { username, password } | null  // decrypt if present, else null (valid for the session's life)
+clearDeviceCredentials(db, event)                          // null out the column
+deviceCredentialStatus(db, event): { set: boolean, username? } // non-secret status for the UI
+```
+
+- No TTL gate — credentials are valid as long as the session is (Req 11.4).
+- Encryption reuses the AES-256-GCM helper (`server/utils/crypto.ts`, `MFA_ENCRYPTION_KEY`).
+- The `user/validate` call goes through the N8N_Client (`validateDeviceCredentials`), same API-key header and timeout as other n8n calls.
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/api/session/device-credentials` | valid session | Validate via `user/validate`, then (on success) encrypt + store for the session. Rejects on invalid credentials. |
+| GET | `/api/session/device-credentials` | valid session | Return `{ set: boolean, username?: string, expiresAt?: string }` — status only, never the password. |
+| GET | `/api/session/device-credentials/reveal` | valid session (owner) | Return `{ username, password }` for the eye-toggle — owner's own session only (Req 11.6). |
+| DELETE | `/api/session/device-credentials` | valid session | Clear the credentials immediately (Req 11.7). |
+
+### Auto-fill flow
+
+The ACL/Route **show** endpoints no longer require credentials in the body. Instead:
+
+1. Handler resolves the session and calls `getDeviceCredentials`.
+2. If none (unset/cleared/expired) → 400 `DEVICE_CREDENTIALS_REQUIRED`; the UI prompts the engineer to enter them (Req 11.5).
+3. Otherwise the service injects `{ execUsername, execPassword }` into the n8n field payload for the read call (Req 11.4).
+
+Add/delete are unchanged: they take the credentials in the request body per operation and never touch this store (Req 11.11, 7.2).
+
+### Reveal boundary
+
+`reveal` is the ONLY path that returns the device password to a client, and only to the engineer who owns that session. It is not logged and never appears in audit (Req 11.6, 11.9). Everything else exposes at most a boolean + username.
 
 ## Correctness Properties
 
@@ -267,9 +335,21 @@ Env consumed by this integration (validated by the main spec's `EnvSchema`):
 
 ### Property 5: API key is sent to n8n and never leaked
 
-*For any* n8n call, the request carries the N8N_API_Key header; and for any client response or audit payload, the N8N_API_Key does not appear.
+*For any* n8n call, the request carries the N8N_API_Key header (`X-NetOps-Internal-Key`); and for any client response or audit payload, the N8N_API_Key does not appear.
 
-**Validates: Requirements 1.2, 1.5, 7.6, 10.4**
+**Validates: Requirements 1.2, 1.5, 7.7, 10.4**
+
+### Property 6: Device Session Credentials are validated, encrypted, owner-scoped, session-lived
+
+*For any* set request, the credentials are stored only after `user/validate` returns `success: true`; the `sessions` row then holds only AES-256-GCM ciphertext (never cleartext); `getDeviceCredentials` returns a value only for the owning session and for the life of that session, and returns null after clear or logout/expiry.
+
+**Validates: Requirements 11.1, 11.2, 11.3, 11.4, 11.8, 11.9**
+
+### Property 7: Device credentials never enter audit or logs; revealed only to the owner
+
+*For any* read operation using Device_Session_Credentials, no audit log or log line contains the credentials (cleartext or ciphertext); the only client path that returns the password is the owner's explicit reveal endpoint.
+
+**Validates: Requirements 11.6, 11.9, 11.10**
 
 ## Testing Strategy
 
@@ -281,16 +361,21 @@ Unit and integration tests use Vitest with the N8N_Client (or global `fetch`) mo
 - `preview.ts` renders each of the four templates and the preview contains `***` in place of credentials, with no n8n side effect (Property 1, main Property 11).
 - N8N_Client response normalization: success shape → SUCCESS, failure shape → FAILED, non-2xx → FAILED, timeout → FAILED, correlation-id mismatch → FAILED (Properties 3, 4).
 
+- `device-credential.service`: set → encrypts (no cleartext column), get → returns null when expired/absent, clear → nulls both columns (Property 6).
+
 ### Integration tests (handlers + mocked N8N_Client)
 
 - `show`/`execute` write one audit log carrying the correlation id, with redacted payloads (Properties 2, 3, 4).
 - Mocked n8n success → `OperationResult` SUCCESS with raw output; mocked n8n error/timeout → FAILED with a safe error and no credentials (Properties 4, 5).
 - The n8n request includes the API-key header and never the API key in the response/audit (Property 5).
 - Permission gating: `show` requires `*_SHOW`, `execute`/`preview` require `*_ADD` or `*_DELETE` per `operation`.
+- A read (show/list) with no/expired Device_Session_Credentials → 400 `DEVICE_CREDENTIALS_REQUIRED`; with valid ones → n8n called with injected credentials, and the audit still shows `***` (Properties 6, 7).
+- Reveal endpoint returns the password only for the owning session; device credentials appear in no audit row (Property 7).
 
 ## Boundaries (what this design does NOT do)
 
 - It does not define or host the n8n workflows; it only calls their webhooks per this contract.
-- It does not store device credentials or ACL/route configuration state.
+- It does not store the device SSH credentials configured inside n8n, nor ACL/route configuration state. The read-path Device_Session_Credentials are a separate, encrypted, session-scoped, expiring convenience.
 - It does not send or execute rendered command strings; n8n composes the command from the field payload.
 - It does not auto-retry configuration-changing operations beyond the guardrail in Requirement 8.5.
+- It does not auto-fill add/delete from the Device_Session_Credentials.

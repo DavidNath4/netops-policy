@@ -8,7 +8,7 @@
 export const REDACTED = '***'
 
 /** Keys whose values are always masked in any object payload. */
-const CREDENTIAL_KEYS = new Set(['execUsername', 'execPassword', 'password', 'apiKey', 'apiToken'])
+const CREDENTIAL_KEYS = new Set(['execUsername', 'execPassword', 'password', 'pass', 'user', 'apiKey', 'apiToken'])
 
 /**
  * Deep-clone `payload` with any credential-bearing key masked to `***`.

@@ -6,6 +6,7 @@ import { buildRoutePreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
 import type { AuditContext } from '../utils/audit-context'
 import { record } from './audit.service'
+import type { DeviceCredentials } from './device-credential.service'
 import type { RouteExecuteInput, RouteShowInput } from '#shared/schemas/route.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
 
@@ -19,16 +20,24 @@ function toOperationResult(correlationId: string, r: N8nResult): OperationResult
   return {
     correlationId,
     status: r.status,
+    message: r.message ?? null,
+    total: r.total ?? null,
+    items: r.items ?? null,
     output: r.output ?? null,
     error: r.error ?? null,
   }
 }
 
-/** ROUTE SHOW — read-only, runs immediately (no confirmation). */
+/**
+ * ROUTE SHOW — search-only, read-only, runs immediately (no confirmation).
+ * Credentials come from the caller's Device Session Credentials. The n8n body is
+ * `{ user, pass, source }` (mirrors the acl/show contract).
+ */
 export async function routeShow(
   db: Database,
   ctx: AuditContext,
   input: RouteShowInput,
+  creds: DeviceCredentials,
 ): Promise<OperationResult> {
   const correlationId = randomUUID()
 
@@ -36,7 +45,11 @@ export async function routeShow(
     module: 'ROUTE',
     action: 'SHOW',
     correlationId,
-    payload: { ...input },
+    body: {
+      user: creds.username,
+      pass: creds.password,
+      source: input.search,
+    },
   })
 
   await record(db, {
@@ -45,11 +58,14 @@ export async function routeShow(
     action: 'SHOW',
     status: result.status,
     correlationId,
-    requestPayload: { filter: input.filter },
+    requestPayload: { source: input.search },
     executionPayload: result.execution ?? null,
-    responsePayload: result.device || result.output || result.error
-      ? { device: result.device ?? null, output: result.output ?? null, error: result.error ?? null }
-      : null,
+    responsePayload: {
+      total: result.total ?? null,
+      items: result.items ?? null,
+      message: result.message ?? null,
+      error: result.error ?? null,
+    },
   })
 
   return toOperationResult(correlationId, result)
@@ -69,24 +85,31 @@ export async function routeExecute(
   const correlationId = randomUUID()
   const preview = buildRoutePreview(input)
 
+  const { execUsername, execPassword, operation, ...fields } = input
   const result = await callN8n({
     module: 'ROUTE',
-    action: input.operation,
+    action: operation,
     correlationId,
-    payload: { ...input },
+    body: { user: execUsername, pass: execPassword, ...fields },
   })
 
   await record(db, {
     ...ctx,
     module: 'ROUTE',
-    action: input.operation,
+    action: operation,
     status: result.status,
     changeTicket: input.changeTicket ?? null,
     correlationId,
     requestPayload: redactPayload({ ...input }),
-    commandPayload: { device: result.device ?? null, command: preview.command },
+    commandPayload: { command: preview.command },
     executionPayload: result.execution ?? null,
-    responsePayload: { device: result.device ?? null, output: result.output ?? null, error: result.error ?? null },
+    responsePayload: {
+      total: result.total ?? null,
+      items: result.items ?? null,
+      message: result.message ?? null,
+      output: result.output ?? null,
+      error: result.error ?? null,
+    },
   })
 
   return toOperationResult(correlationId, result)

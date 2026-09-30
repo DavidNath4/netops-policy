@@ -15,8 +15,13 @@ import type { Module, N8nResult, Operation } from '#shared/schemas/n8n.schema'
 export interface N8nCallOptions {
   module: Module
   action: Operation
-  /** Field payload (already validated). Includes exec credentials + fields. */
-  payload: Record<string, unknown>
+  /**
+   * The exact JSON body n8n expects for this operation (e.g. `{ user, pass,
+   * source }` for acl/show). The service builds it per the n8n contract; the
+   * client sends it as-is. Includes credentials — never logged.
+   */
+  body: Record<string, unknown>
+  /** Internal trace id; sent as a header only (not required in the body). */
   correlationId: string
 }
 
@@ -30,59 +35,107 @@ function resolveWebhookUrl(baseUrl: string, module: Module, action: Operation): 
   return `${base}/${module.toLowerCase()}/${action.toLowerCase()}`
 }
 
-/** Map an unknown n8n response body into a normalized N8nResult. */
-function normalize(
-  ok: boolean,
-  body: unknown,
-  correlationId: string,
-): N8nResult {
-  const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>
+/**
+ * Map an unknown n8n response body into a normalized N8nResult. Handles two
+ * shapes: the structured show shape `{ success, total, data[], message }` and a
+ * simpler `{ success?, output?/error?, device? }`.
+ */
+function normalize(ok: boolean, body: unknown): N8nResult {
+  // n8n often wraps the webhook response in an array ([{ ... }]). Unwrap the
+  // first element so we read the actual payload object.
+  const root = Array.isArray(body) ? body[0] : body
+  const b = (root && typeof root === 'object' ? root : {}) as Record<string, unknown>
 
   const device = typeof b.device === 'string' ? b.device : undefined
-  const execution = (b.execution && typeof b.execution === 'object')
-    ? (b.execution as N8nResult['execution'])
-    : undefined
-  const returnedCorrelation = typeof b.correlationId === 'string' ? b.correlationId : undefined
-
-  // Integrity: if n8n echoes a different correlation id, treat as failure.
-  if (returnedCorrelation && returnedCorrelation !== correlationId) {
-    return {
-      status: 'FAILED',
-      output: null,
-      error: 'Correlation id mismatch in n8n response',
-      device,
-      execution,
-      correlationId,
-    }
-  }
-
-  // Explicit failure signals: non-2xx, an `error` field, or status: 'FAILED'.
+  const message = typeof b.message === 'string' ? b.message : undefined
+  const total = typeof b.total === 'number' ? b.total : undefined
+  const items = Array.isArray(b.data) ? (b.data as unknown[]) : (Array.isArray(b.items) ? (b.items as unknown[]) : undefined)
   const explicitError = typeof b.error === 'string' ? b.error : undefined
-  const explicitStatus = typeof b.status === 'string' ? b.status.toUpperCase() : undefined
-  const failed = !ok || explicitError !== undefined || explicitStatus === 'FAILED'
 
-  if (failed) {
+  // Success is driven by the `success` boolean when present, else HTTP status
+  // (and the absence of an error field).
+  const successFlag = typeof b.success === 'boolean' ? b.success : undefined
+  const succeeded = successFlag !== undefined
+    ? successFlag && ok
+    : (ok && explicitError === undefined)
+
+  if (!succeeded) {
     return {
       status: 'FAILED',
-      output: null,
-      error: explicitError ?? `n8n returned an unsuccessful response`,
+      error: explicitError ?? message ?? 'n8n returned an unsuccessful response',
+      message: message ?? null,
       device,
-      execution,
-      correlationId,
     }
   }
 
-  const output = typeof b.output === 'string'
-    ? b.output
-    : (b.output !== undefined ? JSON.stringify(b.output) : null)
+  const output = typeof b.output === 'string' ? b.output : null
 
   return {
     status: 'SUCCESS',
+    message: message ?? null,
+    total: total ?? (items ? items.length : null),
+    items: items ?? null,
     output,
     error: null,
     device,
-    execution,
-    correlationId,
+  }
+}
+
+export interface ValidateResult {
+  success: boolean
+  message: string
+}
+
+/**
+ * Validate device credentials against the n8n `user/validate` webhook. Used once
+ * when an engineer sets their Device Session Credentials. Never throws — on any
+ * network/timeout error it resolves to `{ success: false, message }` so the
+ * caller can reject the set without storing anything.
+ */
+export async function validateDeviceCredentials(
+  username: string,
+  password: string,
+): Promise<ValidateResult> {
+  const env = loadEnv()
+  const base = env.N8N_BASE_URL.replace(/\/+$/, '')
+  const url = `${base}/user/validate`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-NetOps-Internal-Key': env.N8N_API_KEY,
+      },
+      body: JSON.stringify({ user: username, pass: password }),
+    })
+
+    let body: unknown = null
+    try {
+      body = await res.json()
+    }
+    catch {
+      body = null
+    }
+
+    const b = (body && typeof body === 'object' ? body : {}) as Record<string, unknown>
+    const success = res.ok && b.success === true
+    const message = typeof b.message === 'string'
+      ? b.message
+      : (success ? 'Credential validation success' : 'Invalid username or password')
+
+    return { success, message }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return { success: false, message: aborted ? 'Validation request timed out' : 'Validation service is unreachable' }
+  }
+  finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -104,17 +157,12 @@ export async function callN8n(options: N8nCallOptions): Promise<N8nResult> {
       signal: controller.signal,
       headers: {
         'Content-Type': 'application/json',
-        // API key authenticates the app to n8n. Matches the n8n webhook's
-        // "Header Auth" credential header name.
+        // API key authenticates the app to n8n (same header on every n8n call).
         'X-NetOps-Internal-Key': env.N8N_API_KEY,
+        // Trace id as a header only; the body carries exactly what n8n expects.
         'x-correlation-id': options.correlationId,
       },
-      body: JSON.stringify({
-        module: options.module,
-        action: options.action,
-        correlationId: options.correlationId,
-        ...options.payload,
-      }),
+      body: JSON.stringify(options.body),
     })
 
     let body: unknown = null
@@ -125,15 +173,14 @@ export async function callN8n(options: N8nCallOptions): Promise<N8nResult> {
       body = null
     }
 
-    return normalize(res.ok, body, options.correlationId)
+    return normalize(res.ok, body)
   }
   catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError'
     return {
       status: 'FAILED',
-      output: null,
       error: aborted ? 'n8n request timed out' : 'n8n is unreachable',
-      correlationId: options.correlationId,
+      message: null,
     }
   }
   finally {

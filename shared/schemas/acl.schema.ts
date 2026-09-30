@@ -18,16 +18,18 @@ import {
 // Server-controlled values (correlationId, audit status) are never in these
 // schemas, so a client cannot set them.
 
-/** ACL SHOW — read-only, runs immediately. A single filter value. */
-export const AclShowSchema = z
-  .object({
-    filter: z
-      .string()
-      .trim()
-      .min(1, 'Filter is required')
-      .max(256, 'Filter must be at most 256 characters'),
-  })
-  .merge(ExecCredentialsSchema)
+/**
+ * ACL SHOW — search-only, read-only, runs immediately. Carries a required search
+ * value (an IP address); credentials are NOT in the body — the server auto-fills
+ * them from the caller's Device Session Credentials.
+ */
+export const AclShowSchema = z.object({
+  search: z
+    .string()
+    .trim()
+    .min(1, 'Search value is required')
+    .max(256, 'Search value must be at most 256 characters'),
+})
 export type AclShowInput = z.infer<typeof AclShowSchema>
 
 /** Fields collected for an ACL ADD (before credentials are merged). */

@@ -57,6 +57,30 @@ export async function updateLastUsed(db: Database, tokenHash: string, at: Date):
   await db.update(sessions).set({ lastUsedAt: at }).where(eq(sessions.tokenHash, tokenHash))
 }
 
+/**
+ * Store the encrypted Device Session Credentials on a session row. They are
+ * valid for the life of the session (no separate TTL), so `device_cred_expires_at`
+ * is left null.
+ */
+export async function setDeviceCred(
+  db: Database,
+  tokenHash: string,
+  encrypted: string,
+): Promise<void> {
+  await db
+    .update(sessions)
+    .set({ deviceCredEncrypted: encrypted, deviceCredExpiresAt: null })
+    .where(eq(sessions.tokenHash, tokenHash))
+}
+
+/** Clear the Device Session Credentials from a session row. */
+export async function clearDeviceCred(db: Database, tokenHash: string): Promise<void> {
+  await db
+    .update(sessions)
+    .set({ deviceCredEncrypted: null, deviceCredExpiresAt: null })
+    .where(eq(sessions.tokenHash, tokenHash))
+}
+
 /** Housekeeping: remove sessions whose expiry is already in the past. */
 export async function deleteExpiredSessions(db: Database, now: Date = new Date()): Promise<void> {
   await db.delete(sessions).where(lt(sessions.expiresAt, now))
