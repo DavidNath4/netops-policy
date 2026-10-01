@@ -35,13 +35,17 @@ interface KpiDelta {
   delta: number
 }
 
-/** The three KPI cards. */
+/**
+ * The three KPI cards. Every value represents the CURRENT calendar month, and
+ * the delta is (current month − previous month), so the number and its
+ * comparison share the same time context.
+ */
 export interface Kpi {
-  /** All-time activity count + (thisMonth − lastMonth). */
+  /** Activity recorded during the current calendar month + delta vs last month. */
   totalActivity: KpiDelta
-  /** All-time config-change count + delta. */
+  /** Config mutations during the current calendar month + delta vs last month. */
   configChanges: KpiDelta
-  /** All-time SUCCESS/total*100 (rounded) + percentage-point delta. */
+  /** SUCCESS/total*100 (rounded) for the current month + percentage-point delta. */
   successRate: KpiDelta
 }
 
@@ -117,20 +121,20 @@ const inLastMonth = sql`${auditLogs.createdAt} >= date_trunc('month', now()) - i
 const isConfigChange = sql`${auditLogs.module} in ('ACL','ROUTE') and ${auditLogs.action} in ('ADD','DELETE')`
 
 /**
- * KPI cards: Total Activity, Config Changes, Success Rate — each with a static
- * "this calendar month vs previous calendar month" delta. One grouped query
- * using FILTER so a single scan computes every window.
+ * Dashboard KPI snapshot.
+ *
+ * Every main KPI value represents the CURRENT calendar month; the delta is
+ * (current month − previous month). Keeping the value and its comparison in the
+ * same time context avoids the mismatch of an all-time number next to a monthly
+ * delta. One grouped query using FILTER so a single scan computes every window.
  */
 export async function getKpi(db: Database): Promise<Kpi> {
   const kpiRows = await db
     .select({
-      totalAll: count(),
       totalThis: sql<number>`count(*) filter (where ${inThisMonth})`,
       totalLast: sql<number>`count(*) filter (where ${inLastMonth})`,
-      successAll: sql<number>`count(*) filter (where ${auditLogs.status} = 'SUCCESS')`,
       successThis: sql<number>`count(*) filter (where ${auditLogs.status} = 'SUCCESS' and ${inThisMonth})`,
       successLast: sql<number>`count(*) filter (where ${auditLogs.status} = 'SUCCESS' and ${inLastMonth})`,
-      cfgAll: sql<number>`count(*) filter (where ${isConfigChange})`,
       cfgThis: sql<number>`count(*) filter (where ${isConfigChange} and ${inThisMonth})`,
       cfgLast: sql<number>`count(*) filter (where ${isConfigChange} and ${inLastMonth})`,
     })
@@ -138,21 +142,18 @@ export async function getKpi(db: Database): Promise<Kpi> {
 
   const k = kpiRows[0]!
 
-  const totalAll = num(k.totalAll)
   const totalThis = num(k.totalThis)
   const totalLast = num(k.totalLast)
-  const successAll = num(k.successAll)
   const successThis = num(k.successThis)
   const successLast = num(k.successLast)
-  const cfgAll = num(k.cfgAll)
   const cfgThis = num(k.cfgThis)
   const cfgLast = num(k.cfgLast)
 
   return {
-    totalActivity: { value: totalAll, delta: totalThis - totalLast },
-    configChanges: { value: cfgAll, delta: cfgThis - cfgLast },
+    totalActivity: { value: totalThis, delta: totalThis - totalLast },
+    configChanges: { value: cfgThis, delta: cfgThis - cfgLast },
     successRate: {
-      value: rate(successAll, totalAll),
+      value: rate(successThis, totalThis),
       delta: rate(successThis, totalThis) - rate(successLast, totalLast),
     },
   }
@@ -161,43 +162,79 @@ export async function getKpi(db: Database): Promise<Kpi> {
 /**
  * Activity Over Time: daily/weekly/monthly series in ONE response so the
  * client's Daily/Weekly/Monthly toggle switches instantly without refetching.
- * Each series uses date_trunc; the bucket is formatted to a stable string key.
+ *
+ * ZERO-FILLED: each series spans the FULL window (14 days / 12 weeks / 12
+ * months) via `generate_series`, LEFT JOIN-ed to the per-bucket counts and
+ * coalesced to 0. So every bucket is present — periods with no activity render
+ * as an explicit 0-height bar, bar widths stay consistent, and the x-axis shows
+ * real time gaps instead of collapsing to only the buckets that had data.
  */
 export async function getActivitySeries(db: Database): Promise<ActivitySeries> {
-  const dailyQuery = db
-    .select({
-      bucket: sql<string>`to_char(date_trunc('day', ${auditLogs.createdAt}), 'YYYY-MM-DD')`,
-      count: count(),
-    })
-    .from(auditLogs)
-    .where(sql`${auditLogs.createdAt} >= date_trunc('day', now()) - interval '13 days'`)
-    .groupBy(sql`date_trunc('day', ${auditLogs.createdAt})`)
-    .orderBy(sql`date_trunc('day', ${auditLogs.createdAt})`)
+  // Daily — last 14 days (today and 13 days back), one bucket per calendar day.
+  const dailyQuery = db.execute(sql`
+    with buckets as (
+      select generate_series(
+        date_trunc('day', now()) - interval '13 days',
+        date_trunc('day', now()),
+        interval '1 day'
+      ) as b
+    )
+    select
+      to_char(buckets.b, 'YYYY-MM-DD') as bucket,
+      count(${auditLogs.createdAt}) as count
+    from buckets
+    left join ${auditLogs}
+      on date_trunc('day', ${auditLogs.createdAt}) = buckets.b
+    group by buckets.b
+    order by buckets.b
+  `)
 
-  const weeklyQuery = db
-    .select({
-      bucket: sql<string>`to_char(date_trunc('week', ${auditLogs.createdAt}), 'IYYY-"W"IW')`,
-      count: count(),
-    })
-    .from(auditLogs)
-    .where(sql`${auditLogs.createdAt} >= date_trunc('week', now()) - interval '11 weeks'`)
-    .groupBy(sql`date_trunc('week', ${auditLogs.createdAt})`)
-    .orderBy(sql`date_trunc('week', ${auditLogs.createdAt})`)
+  // Weekly — last 12 ISO weeks, one bucket per week.
+  const weeklyQuery = db.execute(sql`
+    with buckets as (
+      select generate_series(
+        date_trunc('week', now()) - interval '11 weeks',
+        date_trunc('week', now()),
+        interval '1 week'
+      ) as b
+    )
+    select
+      to_char(buckets.b, 'IYYY-"W"IW') as bucket,
+      count(${auditLogs.createdAt}) as count
+    from buckets
+    left join ${auditLogs}
+      on date_trunc('week', ${auditLogs.createdAt}) = buckets.b
+    group by buckets.b
+    order by buckets.b
+  `)
 
-  const monthlyQuery = db
-    .select({
-      bucket: sql<string>`to_char(date_trunc('month', ${auditLogs.createdAt}), 'YYYY-MM')`,
-      count: count(),
-    })
-    .from(auditLogs)
-    .where(sql`${auditLogs.createdAt} >= date_trunc('month', now()) - interval '11 months'`)
-    .groupBy(sql`date_trunc('month', ${auditLogs.createdAt})`)
-    .orderBy(sql`date_trunc('month', ${auditLogs.createdAt})`)
+  // Monthly — last 12 months, one bucket per month.
+  const monthlyQuery = db.execute(sql`
+    with buckets as (
+      select generate_series(
+        date_trunc('month', now()) - interval '11 months',
+        date_trunc('month', now()),
+        interval '1 month'
+      ) as b
+    )
+    select
+      to_char(buckets.b, 'YYYY-MM') as bucket,
+      count(${auditLogs.createdAt}) as count
+    from buckets
+    left join ${auditLogs}
+      on date_trunc('month', ${auditLogs.createdAt}) = buckets.b
+    group by buckets.b
+    order by buckets.b
+  `)
 
   const [daily, weekly, monthly] = await Promise.all([dailyQuery, weeklyQuery, monthlyQuery])
 
-  const toSeries = (rows: { bucket: string, count: number }[]): SeriesPoint[] =>
-    rows.map(r => ({ bucket: r.bucket, count: num(r.count) }))
+  // db.execute returns driver rows (postgres.js: an array of plain objects).
+  const toSeries = (rows: unknown): SeriesPoint[] =>
+    (rows as { bucket: string, count: unknown }[]).map(r => ({
+      bucket: r.bucket,
+      count: num(r.count),
+    }))
 
   return {
     daily: toSeries(daily),
