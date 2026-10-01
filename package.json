@@ -26,6 +26,7 @@
     "drizzle-orm": "^0.45.3",
     "ldapts": "9.2.0",
     "nuxt": "4.5.2",
+    "nuxt-charts": "^2.2.3",
     "otplib": "^13.5.0",
     "postgres": "3.4.9",
     "qrcode": "^1.5.4",

@@ -8,6 +8,7 @@ export default defineNuxtConfig({
   modules: [
     '@nuxt/ui',
     '@nuxt/eslint',
+    'nuxt-charts',
   ],
 
   // Tailwind v4 + Nuxt UI entry; also defines the NetOps design tokens (@theme).

@@ -19,14 +19,53 @@ import type { DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8
 import type { AuditResponse } from '#shared/schemas/audit.schema'
 import type { AclLogResponse, RouteLogResponse } from '#shared/schemas/exec-log.schema'
 
-/** Activity/execution dashboard summary (server: dashboard.service.ts). */
-interface DashboardSummary {
-  totalExecutions: number
-  successCount: number
-  failedCount: number
-  perModule: { module: string, count: number }[]
-  recentActivities: AuditResponse[]
-  failedRecent: AuditResponse[]
+/**
+ * Dashboard widgets (server: dashboard.service.ts). Each widget has its own
+ * endpoint so the frontend fires them in parallel; keep these interfaces in
+ * sync with the matching server response shapes.
+ */
+interface KpiDelta {
+  value: number
+  delta: number
+}
+interface Kpi {
+  totalActivity: KpiDelta
+  configChanges: KpiDelta
+  successRate: KpiDelta
+}
+interface SeriesPoint {
+  bucket: string
+  count: number
+}
+interface ActivitySeries {
+  daily: SeriesPoint[]
+  weekly: SeriesPoint[]
+  monthly: SeriesPoint[]
+}
+interface ConfigByOperation {
+  operation: string
+  count: number
+}
+interface ConfigByOperationResult {
+  items: ConfigByOperation[]
+}
+interface TopUser {
+  username: string
+  count: number
+}
+interface TopUsersResult {
+  items: TopUser[]
+}
+interface RecentConfigChange {
+  id: string
+  module: string
+  action: string
+  username: string | null
+  status: string
+  createdAt: string
+}
+interface RecentConfigChangesResult {
+  items: RecentConfigChange[]
 }
 
 interface Envelope<T> { success: boolean, data: T }
@@ -104,10 +143,22 @@ export function useApi() {
       },
     },
 
-    // Dashboard summary from audit_logs.
+    // Dashboard widgets from audit_logs — one endpoint per widget (parallel).
     dashboard: {
-      summary(): Promise<DashboardSummary> {
-        return apiGet<DashboardSummary>('/api/dashboard/summary')
+      kpi(): Promise<Kpi> {
+        return apiGet<Kpi>('/api/dashboard/kpi')
+      },
+      activitySeries(): Promise<ActivitySeries> {
+        return apiGet<ActivitySeries>('/api/dashboard/activity-series')
+      },
+      configByOperation(): Promise<ConfigByOperationResult> {
+        return apiGet<ConfigByOperationResult>('/api/dashboard/config-by-operation')
+      },
+      topUsers(): Promise<TopUsersResult> {
+        return apiGet<TopUsersResult>('/api/dashboard/top-users')
+      },
+      recentConfigChanges(): Promise<RecentConfigChangesResult> {
+        return apiGet<RecentConfigChangesResult>('/api/dashboard/recent-config-changes')
       },
     },
 
