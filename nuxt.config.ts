@@ -35,5 +35,14 @@ export default defineNuxtConfig({
     typeCheck: false, // typecheck runs via the `typecheck` script (nuxt typecheck)
   },
 
+  // Pre-bundle the heavy Nuxt UI / icon deps once and cache them on disk, so a
+  // restart reuses node_modules/.vite instead of the long cold "Compiled ui/*"
+  // pass. Delete node_modules/.vite to force a fresh pre-bundle.
+  vite: {
+    optimizeDeps: {
+      include: ['@nuxt/ui'],
+    },
+  },
+
   devtools: { enabled: true },
 })

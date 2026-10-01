@@ -15,44 +15,44 @@ import type { RouteAddInput, RouteDeleteInput } from '#shared/schemas/route.sche
 // device-session concerns handled inside n8n; the preview shows only the config
 // intent. (redact.ts still masks any credential value defensively.)
 
-function protocolToken(protocol: string): string {
-  return protocol === 'ANY' ? 'ip' : protocol.toLowerCase()
+function joinAddr(addr: string, mask?: string): string {
+  return mask ? `${addr} ${mask}` : addr
 }
 
-/** ACL ADD preview, e.g. an access-list permit/deny line. */
+/** ACL ADD preview, e.g. an access-list permit line. */
 export function renderAclAdd(f: AclAddInput): string[] {
-  const proto = protocolToken(f.protocol)
-  const verb = f.action === 'ALLOW' ? 'permit' : 'deny'
-  const src = f.sourceMask ? `${f.source} ${f.sourceMask}` : f.source
-  const dst = f.destinationMask ? `${f.destination} ${f.destinationMask}` : f.destination
-  const port = f.port !== undefined ? ` eq ${f.port}` : ''
+  const src = joinAddr(f.source, f.sourceMask)
+  const dst = joinAddr(f.destination, f.destinationMask)
   return [
     'terminal pager 0',
-    `access-list ${f.name} ${verb} ${proto} ${src} ${dst}${port}`.trim(),
+    `access-list extended permit ip ${src} ${dst}`,
     'exit',
   ]
 }
 
 /** ACL DELETE preview. */
 export function renderAclDelete(f: AclDeleteInput): string[] {
+  const src = joinAddr(f.source, f.sourceMask)
+  const dst = joinAddr(f.destination, f.destinationMask)
   return [
     'terminal pager 0',
-    `no access-list ${f.name} extended permit ip ${f.source} ${f.destination}`,
+    `no access-list extended permit ip ${src} ${dst}`,
     'exit',
   ]
 }
 
 /** ROUTE ADD preview, e.g. a static route line. */
 export function renderRouteAdd(f: RouteAddInput): string[] {
+  const route = f.routeMask ? `${f.routeIp} ${f.routeMask}` : f.routeIp
   return [
-    `ip route ${f.destination} ${f.nextHop}`,
+    `ip route ${route}`,
   ]
 }
 
 /** ROUTE DELETE preview. */
 export function renderRouteDelete(f: RouteDeleteInput): string[] {
-  const nextHop = f.nextHop ? ` ${f.nextHop}` : ''
+  const route = f.routeMask ? `${f.routeIp} ${f.routeMask}` : f.routeIp
   return [
-    `no ip route ${f.destination}${nextHop}`,
+    `no ip route ${route}`,
   ]
 }

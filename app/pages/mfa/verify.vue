@@ -24,18 +24,22 @@ onMounted(() => {
   if (challengeExpiresAt.value === null) navigateTo('/login')
 })
 
-async function onVerify() {
+async function onVerify(completed?: string) {
   submitError.value = undefined
   if (expired.value) {
     await navigateTo('/login')
     return
   }
-  codeError.value = /^[0-9]{6}$/.test(code.value.trim()) ? undefined : 'Enter the 6-digit code'
+  // On auto-submit, the `complete` event carries the full 6-digit code; the
+  // v-model `code` ref may not have flushed yet, so prefer the event value.
+  // The form submit handler passes a DOM event, so only trust a string.
+  const value = (typeof completed === 'string' ? completed : code.value).trim()
+  codeError.value = /^[0-9]{6}$/.test(value) ? undefined : 'Enter the 6-digit code'
   if (codeError.value) return
 
   submitting.value = true
   try {
-    await verifyMfa(code.value.trim())
+    await verifyMfa(value)
     await navigateTo('/')
   }
   catch (err) {
@@ -75,7 +79,7 @@ async function onVerify() {
           </span>
         </div>
 
-        <form class="mt-6 flex flex-col gap-4" novalidate @submit.prevent="onVerify">
+        <form class="mt-6 flex flex-col gap-4" novalidate @submit.prevent="onVerify()">
           <FormField label="Verification code" name="code" :error="codeError" required>
             <template #default="{ invalid }">
               <MfaCodeInput

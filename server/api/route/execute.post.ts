@@ -9,7 +9,7 @@ import { useDatabase } from '../../utils/db'
 import { apiError, ok } from '../../utils/envelope'
 
 /**
- * POST /api/routes/execute — confirmed route add/delete, executed via n8n.
+ * POST /api/route/execute — confirmed route add/delete, executed via n8n.
  * Permission depends on the operation: ADD → ROUTES_ADD, DELETE → ROUTES_DELETE.
  * Records one SUCCESS/FAILED audit log with the correlation id.
  */

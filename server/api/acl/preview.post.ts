@@ -16,7 +16,7 @@ export default defineEventHandler(async (event) => {
 
   const parsed = AclPreviewSchema.safeParse(await readBody(event))
   if (!parsed.success) {
-    throw apiError(400, 'VALIDATION_ERROR', 'Invalid ACL preview request')
+    throw apiError(400, 'VALIDATION_ERROR', 'Invalid ACL preview request', parsed.error.flatten().fieldErrors)
   }
 
   const permission = parsed.data.operation === 'ADD'

@@ -77,13 +77,13 @@ export function useApi() {
     // Route operations via n8n (search/preview/execute).
     routeOps: {
       show(search: string): Promise<OperationResult> {
-        return apiSend<OperationResult>('/api/routes/show', 'POST', { search })
+        return apiSend<OperationResult>('/api/route/show', 'POST', { search })
       },
       preview(input: RoutePreviewInput): Promise<{ preview: string, command: string[] }> {
-        return apiSend<{ preview: string, command: string[] }>('/api/routes/preview', 'POST', input)
+        return apiSend<{ preview: string, command: string[] }>('/api/route/preview', 'POST', input)
       },
       execute(input: RouteExecuteInput): Promise<OperationResult> {
-        return apiSend<OperationResult>('/api/routes/execute', 'POST', input)
+        return apiSend<OperationResult>('/api/route/execute', 'POST', input)
       },
     },
 

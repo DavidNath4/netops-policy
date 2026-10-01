@@ -51,6 +51,7 @@ const allLinks: NavLink[] = [
     permission: 'ACL_POLICIES_SHOW',
     children: [
       { label: 'Add ACL', to: '/acl/add', icon: 'i-lucide-shield-plus', permission: 'ACL_POLICIES_ADD' },
+      { label: 'Delete ACL', to: '/acl/delete', icon: 'i-lucide-shield-off', permission: 'ACL_POLICIES_DELETE' },
     ],
   },
   {
@@ -60,6 +61,7 @@ const allLinks: NavLink[] = [
     permission: 'ROUTES_SHOW',
     children: [
       { label: 'Add Route', to: '/routes/add', icon: 'i-lucide-plus', permission: 'ROUTES_ADD' },
+      { label: 'Delete Route', to: '/routes/delete', icon: 'i-lucide-route-off', permission: 'ROUTES_DELETE' },
     ],
   },
   { label: 'Administration', to: '/administration', icon: 'i-lucide-users', permission: 'ADMINISTRATION_SHOW' },
@@ -135,6 +137,7 @@ function isExpanded(to: string): boolean {
 <template>
   <nav
     class="flex h-full w-full flex-col overflow-y-auto bg-sidebar"
+    style="zoom: 1.1"
     aria-label="Primary navigation"
   >
     <!-- Section label (hidden in rail mode) -->

@@ -7,7 +7,7 @@ import { redactPayload } from '../network/redact'
 import type { AuditContext } from '../utils/audit-context'
 import { record } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
-import type { RouteExecuteInput, RouteShowInput } from '#shared/schemas/route.schema'
+import type { RouteExecuteInput } from '#shared/schemas/route.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
 
 /**
@@ -29,18 +29,29 @@ function toOperationResult(correlationId: string, r: N8nResult): OperationResult
 }
 
 /**
- * ROUTE SHOW — search-only, read-only, runs immediately (no confirmation).
+ * Join a route IP and its mask into the single "IP MASK" string n8n expects.
+ * If the IP already contains a mask (a space), it is used as-is; otherwise a
+ * missing mask defaults to the /32 host mask.
+ */
+function joinAddr(addr: string, mask?: string): string {
+  const a = addr.trim()
+  if (a.includes(' ')) return a
+  return `${a} ${(mask ?? '255.255.255.255').trim()}`
+}
+
+/**
+ * ROUTE SHOW — show-all, read-only, runs immediately (no confirmation).
  * Credentials come from the caller's Device Session Credentials. The n8n body is
- * `{ user, pass, source }` (mirrors the acl/show contract).
+ * `{ user, pass }` only; it returns the full route table and the client filters.
  */
 export async function routeShow(
   db: Database,
   ctx: AuditContext,
-  input: RouteShowInput,
   creds: DeviceCredentials,
 ): Promise<OperationResult> {
   const correlationId = randomUUID()
 
+  // n8n route/show contract: { user, pass } only.
   const result = await callN8n({
     module: 'ROUTE',
     action: 'SHOW',
@@ -48,7 +59,6 @@ export async function routeShow(
     body: {
       user: creds.username,
       pass: creds.password,
-      source: input.search,
     },
   })
 
@@ -58,7 +68,8 @@ export async function routeShow(
     action: 'SHOW',
     status: result.status,
     correlationId,
-    requestPayload: { source: input.search },
+    // route/show is show-all; no search value is part of the contract.
+    requestPayload: null,
     executionPayload: result.execution ?? null,
     responsePayload: {
       total: result.total ?? null,
@@ -85,18 +96,23 @@ export async function routeExecute(
   const correlationId = randomUUID()
   const preview = buildRoutePreview(input)
 
-  const { execUsername, execPassword, operation, ...fields } = input
+  // n8n route/add & route/delete contract: { user, pass, destination }, where
+  // destination is a joined "IP MASK" string.
   const result = await callN8n({
     module: 'ROUTE',
-    action: operation,
+    action: input.operation,
     correlationId,
-    body: { user: execUsername, pass: execPassword, ...fields },
+    body: {
+      user: input.execUsername,
+      pass: input.execPassword,
+      destination: joinAddr(input.routeIp, input.routeMask),
+    },
   })
 
   await record(db, {
     ...ctx,
     module: 'ROUTE',
-    action: operation,
+    action: input.operation,
     status: result.status,
     changeTicket: input.changeTicket ?? null,
     correlationId,

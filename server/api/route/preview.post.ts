@@ -7,7 +7,7 @@ import { assertSameOrigin, requirePermission } from '../../utils/auth'
 import { apiError, ok } from '../../utils/envelope'
 
 /**
- * POST /api/routes/preview — build the redacted command preview for a route
+ * POST /api/route/preview — build the redacted command preview for a route
  * add/delete (display only, no n8n call, no audit). Permission depends on the
  * operation: ADD → ROUTES_ADD, DELETE → ROUTES_DELETE.
  */

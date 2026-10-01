@@ -18,6 +18,17 @@ import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
  * device command itself.
  */
 
+/**
+ * Join an address and its mask into the single "IP MASK" string n8n expects.
+ * If the address already contains a mask (a space), it is used as-is; otherwise
+ * a missing mask defaults to the /32 host mask.
+ */
+function joinAddr(addr: string, mask?: string): string {
+  const a = addr.trim()
+  if (a.includes(' ')) return a
+  return `${a} ${(mask ?? '255.255.255.255').trim()}`
+}
+
 /** Build the client-facing result from a normalized n8n result. */
 function toOperationResult(correlationId: string, r: N8nResult): OperationResult {
   return {
@@ -89,22 +100,26 @@ export async function aclExecute(
   const correlationId = randomUUID()
   const preview = buildAclPreview(input)
 
-  // n8n contract uses `user`/`pass`; map the form's exec credentials and send
-  // the remaining fields alongside.
-  const { execUsername, execPassword, operation, ...fields } = input
+  // n8n acl/add & acl/delete contract: { user, pass, source, destination },
+  // where source/destination are joined "IP MASK" strings. A missing mask
+  // defaults to a /32 host mask (255.255.255.255).
   const result = await callN8n({
     module: 'ACL',
-    action: operation,
+    action: input.operation,
     correlationId,
-    body: { user: execUsername, pass: execPassword, ...fields },
+    body: {
+      user: input.execUsername,
+      pass: input.execPassword,
+      source: joinAddr(input.source, 'sourceMask' in input ? input.sourceMask : undefined),
+      destination: joinAddr(input.destination, 'destinationMask' in input ? input.destinationMask : undefined),
+    },
   })
 
   await record(db, {
     ...ctx,
     module: 'ACL',
-    action: operation,
+    action: input.operation,
     status: result.status,
-    changeTicket: input.changeTicket ?? null,
     correlationId,
     // redactPayload masks user/pass/exec*; the command snapshot is already
     // credential-free (preview never embeds creds).

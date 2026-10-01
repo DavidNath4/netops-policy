@@ -9,6 +9,7 @@ definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_SHOW' })
 const api = useApi()
 const { can } = usePermissions()
 const canAdd = computed(() => can('ACL_POLICIES_ADD'))
+const canDelete = computed(() => can('ACL_POLICIES_DELETE'))
 
 const { isSet, status, ensureLoaded, clear } = useDeviceCredentials()
 const credModalOpen = ref(false)
@@ -115,7 +116,7 @@ async function onClearCreds() {
 </script>
 
 <template>
-  <div class="flex flex-col gap-6">
+  <div class="flex flex-col gap-6" style="zoom: 1.2">
     <PageHeader title="ACL Policies" description="Search ACLs live from the device.">
       <template #actions>
         <NuxtLink
@@ -125,6 +126,14 @@ async function onClearCreds() {
         >
           <UIcon name="i-lucide-plus" class="size-4" />
           Add ACL
+        </NuxtLink>
+        <NuxtLink
+          v-if="canDelete"
+          to="/acl/delete"
+          class="inline-flex h-[38px] items-center gap-1.5 rounded-md border border-line bg-panel px-4 text-xs font-semibold text-bad transition-colors hover:bg-surface"
+        >
+          <UIcon name="i-lucide-trash-2" class="size-4" />
+          Delete ACL
         </NuxtLink>
       </template>
     </PageHeader>

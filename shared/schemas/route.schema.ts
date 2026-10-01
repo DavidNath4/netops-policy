@@ -1,60 +1,45 @@
 import { z } from 'zod'
 
 import { ExecCredentialsSchema } from './n8n.schema'
-import {
-  ChangeTicketSchema,
-  CidrSchema,
-  IpAddressSchema,
-  TimeRangeSchema,
-} from './network.schema'
+import { ChangeTicketSchema, MaskSchema } from './network.schema'
 
 // Route operation request payloads (Zod, runtime). Field payloads sent to n8n —
 // not DB rows and not rendered command strings. Mirrors the ACL schemas.
 
 /**
- * ROUTE SHOW — search-only, read-only, runs immediately. Required search value
- * (an IP address); credentials are auto-filled from the caller's Device Session
- * Credentials, not sent in the body.
+ * ROUTE SHOW — show-all, read-only, runs immediately. The n8n route/show
+ * contract takes only credentials ({ user, pass }); there is no search value
+ * (filtering happens client-side on the returned rows). `search` is accepted
+ * but optional and ignored server-side. Credentials are auto-filled from the
+ * caller's Device Session Credentials, not sent in the body.
  */
 export const RouteShowSchema = z.object({
-  search: z
-    .string()
-    .trim()
-    .min(1, 'Search value is required')
-    .max(256, 'Search value must be at most 256 characters'),
+  search: z.string().trim().max(256).optional(),
 })
 export type RouteShowInput = z.infer<typeof RouteShowSchema>
 
-/** Fields collected for a ROUTE ADD (before credentials are merged). */
-const RouteAddFields = z.object({
-  name: z.string().trim().min(1, 'Name is required').max(128, 'Name must be at most 128 characters'),
-  destination: CidrSchema,
-  source: z.string().trim().min(1).max(64).optional(),
-  nextHop: IpAddressSchema,
-  policy: z.string().trim().max(128).optional(),
-  timeRange: TimeRangeSchema.optional(),
+/**
+ * Fields for ROUTE ADD/DELETE: a route IP with an optional mask. UI phase —
+ * ADD and DELETE share the same shape; the n8n contract is wired in later.
+ */
+const RouteFields = z.object({
+  routeIp: z.string().trim().min(1, 'Route IP is required').max(64),
+  routeMask: MaskSchema.optional(),
   changeTicket: ChangeTicketSchema.optional(),
 })
 
 /** ROUTE ADD field payload (with credentials). */
-export const RouteAddSchema = RouteAddFields.merge(ExecCredentialsSchema)
+export const RouteAddSchema = RouteFields.merge(ExecCredentialsSchema)
 export type RouteAddInput = z.infer<typeof RouteAddSchema>
 
-/** Fields collected for a ROUTE DELETE (before credentials are merged). */
-const RouteDeleteFields = z.object({
-  destination: CidrSchema,
-  nextHop: IpAddressSchema.optional(),
-  changeTicket: ChangeTicketSchema.optional(),
-})
-
 /** ROUTE DELETE field payload (with credentials). */
-export const RouteDeleteSchema = RouteDeleteFields.merge(ExecCredentialsSchema)
+export const RouteDeleteSchema = RouteFields.merge(ExecCredentialsSchema)
 export type RouteDeleteInput = z.infer<typeof RouteDeleteSchema>
 
 /** Preview request: which operation + its fields (ADD/DELETE only). */
 export const RoutePreviewSchema = z.discriminatedUnion('operation', [
-  z.object({ operation: z.literal('ADD') }).merge(RouteAddFields).merge(ExecCredentialsSchema),
-  z.object({ operation: z.literal('DELETE') }).merge(RouteDeleteFields).merge(ExecCredentialsSchema),
+  z.object({ operation: z.literal('ADD') }).merge(RouteFields).merge(ExecCredentialsSchema),
+  z.object({ operation: z.literal('DELETE') }).merge(RouteFields).merge(ExecCredentialsSchema),
 ])
 export type RoutePreviewInput = z.infer<typeof RoutePreviewSchema>
 

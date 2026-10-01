@@ -41,7 +41,6 @@ export const ChangeTicketSchema = z
   .trim()
   .min(1, 'Change ticket is required')
   .max(64, 'Change ticket must be at most 64 characters')
-  .regex(/^[A-Za-z]+-\d+$/, 'Invalid change ticket (expected e.g. CHG-123456)')
 
 /**
  * Free-text time range for a rule (e.g. "31-May-26"). The exact format is
@@ -68,3 +67,80 @@ export const MaskSchema = z
   .trim()
   .min(1, 'Mask is required')
   .max(64, 'Mask must be at most 64 characters')
+
+/**
+ * All IPv4 subnet masks, /0 through /32, as dropdown options. `cidr` is the
+ * prefix length and `mask` the dotted-decimal form the device/n8n expects.
+ * Generated so there is one entry per prefix length (no hand-maintained list).
+ */
+export interface MaskOption {
+  cidr: number
+  mask: string
+  /** e.g. "/24 — 255.255.255.0" */
+  label: string
+}
+
+export const SUBNET_MASKS: MaskOption[] = Array.from({ length: 33 }, (_, cidr) => {
+  // Build the 32-bit mask for this prefix length, then split into 4 octets.
+  const bits = cidr === 0 ? 0 : (0xFFFFFFFF << (32 - cidr)) >>> 0
+  const mask = [24, 16, 8, 0].map(shift => (bits >>> shift) & 0xFF).join('.')
+  return { cidr, mask, label: `/${cidr} — ${mask}` }
+})
+
+/**
+ * Infer the CIDR prefix length from a dotted-decimal subnet mask.
+ * Returns the prefix (0–32) for a valid, contiguous mask, or null when the
+ * value is malformed or not a real mask (e.g. 255.0.255.0). Used by the UI to
+ * show a live "/24" hint, or "/?" when the mask makes no sense.
+ */
+export function maskToCidr(mask: string): number | null {
+  const parts = mask.trim().split('.')
+  if (parts.length !== 4) return null
+
+  let bits = 0
+  for (const part of parts) {
+    if (!/^\d{1,3}$/.test(part)) return null
+    const n = Number(part)
+    if (n > 255) return null
+    bits = (bits << 8) | n
+  }
+  bits = bits >>> 0
+
+  // A valid mask is a run of 1s followed by a run of 0s. Invert and check the
+  // zeros form a contiguous low block: (~bits + 1) must be a power of two.
+  const inverted = (~bits) >>> 0
+  if (((inverted + 1) & inverted) !== 0) return null
+
+  // Count the leading 1 bits = prefix length.
+  let cidr = 0
+  for (let i = 31; i >= 0; i--) {
+    if ((bits >>> i) & 1) cidr++
+    else break
+  }
+  return cidr
+}
+
+/**
+ * True when `value` is a valid IPv4 address (four octets 0–255). Used by the UI
+ * for a live validity hint and to block submit on malformed input.
+ */
+export function isValidIpv4(value: string): boolean {
+  return Ipv4Schema.safeParse(value.trim()).success
+}
+
+/**
+ * Clamp a raw string to a legal partial-or-complete IPv4 / dotted-decimal mask
+ * as the user types: keep only digits and dots, drop a leading dot, collapse
+ * repeated dots, allow at most 4 octets, each at most 3 digits and capped at
+ * 255. Shared by the IP and mask inputs so both lock input the same way.
+ */
+export function sanitizeIpv4Input(raw: string): string {
+  let s = raw.replace(/[^\d.]/g, '')
+  s = s.replace(/^\.+/, '').replace(/\.{2,}/g, '.')
+  const octets = s.split('.').slice(0, 4).map((p) => {
+    let o = p.slice(0, 3)
+    if (o !== '' && Number(o) > 255) o = '255'
+    return o
+  })
+  return octets.join('.')
+}

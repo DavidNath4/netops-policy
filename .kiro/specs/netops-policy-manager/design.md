@@ -813,9 +813,9 @@ The Command_Preview is built and redacted **on the server** and returned for dis
 | POST | `/api/acl/show` | ACL_POLICIES_SHOW | `AclShowSchema` (required search value; creds auto-filled from session) | `OperationResult` (search result) (Req 4.1–4.3) |
 | POST | `/api/acl/preview` | ACL_POLICIES_ADD or ACL_POLICIES_DELETE | `AclPreviewSchema` | `{ preview: string }` (redacted) (Req 4.8) |
 | POST | `/api/acl/execute` | ACL_POLICIES_ADD (op=ADD) / ACL_POLICIES_DELETE (op=DELETE) | `{operation} & AclAddSchema \| AclDeleteSchema` | `OperationResult` (Req 4.9, 4.10) |
-| POST | `/api/routes/show` | ROUTES_SHOW | `RouteShowSchema` (required search value; creds auto-filled from session) | `OperationResult` (search result) (Req 6.1–6.3) |
-| POST | `/api/routes/preview` | ROUTES_ADD or ROUTES_DELETE | `RoutePreviewSchema` | `{ preview: string }` (redacted) (Req 6.6) |
-| POST | `/api/routes/execute` | ROUTES_ADD (op=ADD) / ROUTES_DELETE (op=DELETE) | `{operation} & RouteAddSchema \| RouteDeleteSchema` | `OperationResult` (Req 6.7, 6.8) |
+| POST | `/api/route/show` | ROUTES_SHOW | `RouteShowSchema` (required search value; creds auto-filled from session) | `OperationResult` (search result) (Req 6.1–6.3) |
+| POST | `/api/route/preview` | ROUTES_ADD or ROUTES_DELETE | `RoutePreviewSchema` | `{ preview: string }` (redacted) (Req 6.6) |
+| POST | `/api/route/execute` | ROUTES_ADD (op=ADD) / ROUTES_DELETE (op=DELETE) | `{operation} & RouteAddSchema \| RouteDeleteSchema` | `OperationResult` (Req 6.7, 6.8) |
 | GET | `/api/audit` | valid session | `AuditQuerySchema` | `Paginated<AuditResponse>` (Req 8.8) |
 | GET | `/api/audit/:id` | valid session | — | `AuditResponse` (Req 8.9) |
 | GET | `/api/audit/export` | valid session | `AuditQuerySchema` | export payload (Req 8.10) |

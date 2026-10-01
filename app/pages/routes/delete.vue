@@ -1,12 +1,12 @@
 <script setup lang="ts">
-// Add Route — Generate (server preview, redacted) → Execute (via n8n) flow.
-// Mirror of the ACL add page. Fields: route IP + mask + ticket, plus execution
-// credentials (user/pass). UI phase; n8n contract wired in later.
+// Delete Route — Generate (server preview, redacted) → Execute (via n8n).
+// Mirror of the ACL delete page. Fields: route IP + mask + ticket, plus
+// execution credentials (user/pass). UI phase; n8n contract wired in later.
 import type { RoutePreviewInput } from '#shared/schemas/route.schema'
 import type { OperationResult } from '#shared/schemas/n8n.schema'
 import { isValidIpv4 } from '#shared/schemas/network.schema'
 
-definePageMeta({ middleware: 'permission', permission: 'ROUTES_ADD' })
+definePageMeta({ middleware: 'permission', permission: 'ROUTES_DELETE' })
 
 const api = useApi()
 
@@ -22,7 +22,7 @@ const showPassword = ref(false)
 
 function buildPayload(): RoutePreviewInput {
   return {
-    operation: 'ADD',
+    operation: 'DELETE',
     routeIp: form.routeIp.trim(),
     routeMask: form.routeMask.trim() || undefined,
     changeTicket: form.changeTicket.trim() || undefined,
@@ -66,10 +66,10 @@ async function onGenerate() {
   }
   generating.value = true
   try {
-    // Pre-check: an ADD must NOT already exist.
+    // Pre-check: a DELETE must already exist.
     const exists = await routeExists(form.routeIp)
-    if (exists) {
-      warningMsg.value = 'A route for this IP already exists. Nothing to add.'
+    if (!exists) {
+      warningMsg.value = 'No route for this IP exists. Nothing to delete.'
       return
     }
     const { preview: text } = await api.routeOps.preview(buildPayload())
@@ -106,7 +106,7 @@ const inputClass
 <template>
   <div class="flex flex-col gap-6" style="zoom: 1.3">
     <PageHeader
-      title="Add Route"
+      title="Delete Route"
       description="Fill the fields, generate the command, then execute via automation."
     >
       <template #actions>
@@ -231,7 +231,7 @@ const inputClass
             v-else
             type="button"
             :disabled="executing"
-            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
+            class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-bad px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
             @click="confirmOpen = true"
           >
             <UIcon name="i-lucide-play" class="size-4" />
@@ -243,10 +243,10 @@ const inputClass
 
     <ConfirmDialog
       v-model="confirmOpen"
-      title="Execute route command?"
-      message="This will run the previewed command on the target device via automation. This action changes device configuration."
-      confirm-label="Execute"
-      confirm-color="primary"
+      title="Execute route delete?"
+      message="This will remove the previewed route on the target device via automation. This action changes device configuration."
+      confirm-label="Delete"
+      confirm-color="error"
       :loading="executing"
       @confirm="onExecuteConfirmed"
     />

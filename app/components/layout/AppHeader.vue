@@ -22,10 +22,19 @@ const notificationCount = ref(3)
 
 const notifOpen = ref(false)
 const profileOpen = ref(false)
+const logoutOpen = ref(false)
+const loggingOut = ref(false)
 
 async function onLogout() {
   // logout() clears auth state and navigates to /login itself.
-  await logout()
+  loggingOut.value = true
+  try {
+    await logout()
+  }
+  finally {
+    loggingOut.value = false
+    logoutOpen.value = false
+  }
 }
 </script>
 
@@ -85,12 +94,17 @@ async function onLogout() {
         variant="ghost"
         aria-label="Logout"
         class="text-ink hover:bg-black/5"
-        @click="onLogout"
+        @click="logoutOpen = true"
       />
     </div>
 
     <!-- Modals -->
     <LayoutNotificationModal v-model:open="notifOpen" :count="notificationCount" />
     <LayoutProfileModal v-model:open="profileOpen" />
+    <LayoutLogoutNotificationModal
+      v-model:open="logoutOpen"
+      :loading="loggingOut"
+      @confirm="onLogout"
+    />
   </header>
 </template>
