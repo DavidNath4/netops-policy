@@ -12,6 +12,49 @@ Authentication supports two account origins (`auth_provider`): **LOCAL** account
 
 This document defines the functional requirements (grouped by capability area), non-functional requirements, and explicit out-of-scope boundaries.
 
+## Current implementation status (dev phase — source of truth)
+
+> The detailed acceptance criteria below capture the originally intended design.
+> The notes here reflect what the code currently does and **override** the older
+> wording where they conflict. (Updated 2026-09-25.)
+
+- **ACL add/delete fields (simplified).** Forms collect only `source`, `sourceMask`,
+  `destination`, `destinationMask`, and an optional `changeTicket`. The removed
+  fields (name, protocol, port, action, time range, description) are **not** part of
+  the current contract. The n8n body is `{ user, pass, source, destination }` with
+  `source`/`destination` as joined `"IP MASK"` strings (see n8n Integration spec).
+- **Route add/delete fields (simplified).** Forms collect `routeIp`, `routeMask`,
+  and an optional `changeTicket`; the n8n body is `{ user, pass, destination }`
+  (joined `"IP MASK"`). The earlier route fields (name, next_hop, policy, CIDR
+  destination, source, time range) are not in the current contract.
+- **Route show is show-all.** The route page fetches the full table on load
+  (`{ user, pass }`, no search) and **filters client-side**; the ACL page is still
+  per-IP search. There IS now an unfiltered route "show all".
+- **Existence pre-check.** Add blocks if the entry already exists; delete blocks if
+  it does not (UI guardrail; ACL matches source+destination, route matches route IP).
+- **Locked IP/mask inputs.** IP and mask fields accept digits+dots only (≤255/octet,
+  ≤4 octets), show a validity/CIDR badge, and block submit when the IP is invalid.
+- **User management reduced.** User **creation** and **password reset** are DISABLED
+  (both the UI and `POST /api/users`, `POST /api/users/:id/reset-password` reject);
+  accounts are provisioned via AD sign-in. Edit name / change role / enable-disable
+  remain. So the Admin-area criteria for create (2, 8) and reset (6) are currently off.
+- **Endpoints are singular**: `/api/acl/*` and `/api/route/*`.
+- **Log Trail delivered** at `/logs` (common access, no permission guard) as a
+  standard horizontal table with columns **Time, User, Module, Action, Status**.
+  Filters: search (matches username / display name / email), module, action,
+  status, and a From/To date range; server-side pagination; loading/empty/error
+  states. A row-click detail modal shows the full audit record (incl. technical
+  fields like Source IP and Correlation Id) and the four JSONB payloads; for
+  ACL/ROUTE rows it also fetches the `acl_logs`/`route_logs` detail by correlation
+  id and shows an "Execution Inspection" section. All copy is in English.
+- **Auth activity audited.** Every login (success/failed), and logout, is recorded
+  to `audit_logs` for all account origins (LOCAL/AD) and all roles (incl.
+  `role_id = null`); the `audit_action` enum gained `LOGOUT`. Failed-login records
+  store only `{ identifier, provider?, reason }`, never a password.
+- **Audit-detail tables.** `acl_logs`/`route_logs` complement `audit_logs` for
+  ACL/ROUTE execution detail (see n8n Integration spec, Req 12); there are still
+  no ACL/route configuration-state tables.
+
 ## Glossary
 
 - **NetOps_Policy_Manager**: The complete web application system described in this document.
@@ -196,15 +239,17 @@ The three route operations map to the RBAC permissions `ROUTES_SHOW`, `ROUTES_AD
 
 #### Acceptance Criteria
 
-1. THE Audit_Service SHALL record an Audit_Log for the activities LOGIN (success/failed), LOGOUT, USER (create/update/role-change/status-change/password-reset), ACL (show/add/delete), and ROUTE (show/add/delete), and SHALL classify each by a `module` (`AUTH` | `USER` | `ACL` | `ROUTE` | `N8N`) and an `action` (`LOGIN` | `SHOW` | `ADD` | `DELETE` | `UPDATE`).
+1. THE Audit_Service SHALL record an Audit_Log for the activities LOGIN (success/failed), LOGOUT, USER (create/update/role-change/status-change/password-reset), ACL (show/add/delete), and ROUTE (show/add/delete), and SHALL classify each by a `module` (`AUTH` | `USER` | `ACL` | `ROUTE` | `N8N`) and an `action` (`LOGIN` | `SHOW` | `ADD` | `DELETE` | `UPDATE` | `LOGOUT`). THE Audit_Service SHALL record all authentication activity — login success, login failed, and logout — for every account origin (LOCAL and AD) and every role, including a user whose `role_id` is null; a failed-login record SHALL carry only `{ identifier, provider?, reason }` and SHALL NEVER include a password.
 2. THE Data_Layer SHALL store each Audit_Log with the columns `id` (UUID PK), `user_id` (UUID, nullable — a failed login may have no known user), `username` (snapshot at action time), `user_role` (snapshot at action time), `module`, `action`, `status` (`SUCCESS` | `FAILED`), `source_ip`, `user_agent`, `correlation_id`, and `created_at`.
 3. THE Data_Layer SHALL store, per Audit_Log, four flexible JSONB payload columns: `request_payload` (the submitted field values / filter), `command_payload` (the redacted command snapshot actually representing the operation, e.g. `{ device, command: [...] }`), `execution_payload` (n8n execution metadata such as executor, workflow_id, execution_id, started_at, finished_at, duration_ms), and `response_payload` (the device output or error, e.g. `{ device, output }` or `{ device, error }`).
 4. THE Audit_Service SHALL exclude passwords, password hashes, Session_Tokens, cookie values, authorization headers, the DATABASE_URL value, the n8n API key, and the raw Execution_Credentials from every Audit_Log and every JSONB payload; the Execution_Credentials SHALL appear only as `***`.
 5. WHEN an operation is delegated to n8n, THE Audit_Service SHALL record the Correlation_Id on the Audit_Log so the request, the n8n execution, the device command, and the device response are linkable as one operation.
 6. WHEN an operation completes, THE Audit_Service SHALL set `status` to `SUCCESS` or `FAILED` according to the outcome (including n8n/device errors and unreachable-n8n cases).
 7. THE API_Layer SHALL NOT expose any endpoint that deletes or mutates Audit_Logs during normal operation.
-8. WHEN any authenticated user opens the `/logs` (Log Trail) page, THE Frontend SHALL provide search, date filtering, module/action filtering, status filtering, and pagination.
-9. WHEN any authenticated user selects an Audit_Log, THE Frontend SHALL display a detail view including the four JSONB payloads.
+8. WHEN any authenticated user opens the `/logs` (Log Trail) page, THE Frontend SHALL provide search, date filtering (From/To), module/action filtering, status filtering, and server-side pagination, and SHALL present the records as a standard horizontal table (at minimum the columns Time, User, Module, Action, Status). All user-facing Log Trail copy SHALL be in English, consistent with the other modules.
+8a. WHEN an authenticated user searches the Log Trail, THE Audit_Service SHALL match the search value against the audit `username` snapshot and, via a LEFT JOIN to `users` on `audit_logs.user_id`, the user's `display_name` and `email`.
+9. WHEN any authenticated user selects an Audit_Log, THE Frontend SHALL display a detail view including the technical fields (such as Source IP and Correlation Id) and the four JSONB payloads. WHERE the selected record is an ACL or ROUTE operation, THE Frontend SHALL fetch the matching `acl_logs`/`route_logs` detail by correlation id and present it as an "Execution Inspection" section.
+9a. THE Data_Layer SHALL maintain two audit-detail tables, `acl_logs` and `route_logs`, that complement `audit_logs` for ACL/ROUTE operations (deeper execution-inspection detail), each detail row written in the same transaction as its master `audit_logs` row and linked by `audit_id` (FK → `audit_logs.id`, `ON DELETE CASCADE`) and `correlation_id`. These are audit detail, not device configuration state, and are specified in full in the n8n Integration spec (Req 12).
 10. WHEN any authenticated user requests an export, THE Audit_Service SHALL produce an export of the selected Audit_Logs.
 11. THE Log Trail SHALL be available to every authenticated user and SHALL NOT require a feature Permission.
 12. WHERE an Audit_Log JSONB payload shape must change to match n8n's evolving request/response, THE NetOps_Policy_Manager SHALL accommodate the change through the flexible JSONB columns without a schema migration to the fixed columns.
@@ -231,8 +276,8 @@ Because this application is not the source of truth for ACL/route configuration,
 
 #### Acceptance Criteria
 
-1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, permissions, roles_permissions, sessions, user_mfa, and audit_logs.
-2. THE Data_Layer SHALL NOT define any `acl_policies` or `routes` configuration table; this application does not store network device configuration state.
+1. THE Data_Layer SHALL define Drizzle schemas for the tables users, roles, permissions, roles_permissions, sessions, user_mfa, audit_logs, acl_logs, and route_logs. The `acl_logs`/`route_logs` tables are audit-detail tables that complement `audit_logs` for ACL/ROUTE operations (n8n Integration spec, Req 12).
+2. THE Data_Layer SHALL NOT define any `acl_policies` or `routes` configuration-state table; this application does not store network device configuration state. (The `acl_logs`/`route_logs` tables record what an operation did, not device configuration state.)
 3. THE Data_Layer SHALL use UUID values as primary key identifiers.
 4. THE Data_Layer SHALL enforce a unique constraint on the users email column, a unique constraint on the users external_id column, and a partial unique constraint on the users username column (where username is not null) for directory-provisioned accounts.
 5. THE Data_Layer SHALL define foreign key constraints between related tables.

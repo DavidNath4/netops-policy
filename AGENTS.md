@@ -68,6 +68,16 @@ EARS style. UI/frontend conventions are in `.kiro/steering/ui-conventions.md`.
 - **RBAC is data-driven.** Never branch on a role id (`role === 'ADMIN'`); gate
   with `requirePermission(event, 'FEATURE_ACTION')` resolved from the DB. A user
   with `role_id = null` has common access only (Dashboard + Log Trail).
+- **Audit:** `audit_logs` is the system-of-record and records ALL modules —
+  AUTH (login success/failed, logout, for every user type and role, including
+  `role_id = null`), USER, ACL, ROUTE, N8N. Two detail tables, `acl_logs` and
+  `route_logs`, complement it: they hold deeper execution-inspection detail for
+  the sensitive ACL/ROUTE operations, written in the SAME transaction as the
+  master audit row and linked by `audit_id` (FK → `audit_logs.id`) +
+  `correlation_id`. They do NOT replace `audit_logs`. There are still **no
+  ACL/route configuration-state tables** — the app stores no device config and
+  still delegates all execution to n8n; `acl_logs`/`route_logs` are audit detail
+  only, and every persisted JSONB is redacted (never a credential/password).
 - **Database:** never auto-migrate on startup; all queries go through Drizzle
   (parameterized); the app never creates the DB or falls back to SQLite.
 - **Config:** validated at startup by the Zod `EnvSchema` in

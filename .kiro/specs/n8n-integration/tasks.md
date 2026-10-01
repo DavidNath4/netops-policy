@@ -12,8 +12,11 @@ to **n8n** (per-operation webhooks `<base>/<module>/<action>`, header
 `X-NetOps-Internal-Key`). Add/delete show a **redacted command preview**, then
 execute on explicit confirmation; read (show/list/search/detail) is read-only and
 runs immediately, fetching live from n8n. One **correlation id** links request →
-n8n → device → response. There are **no `acl_policies`/`routes` tables** — the DB
-stores audit logs only.
+n8n → device → response. There are **no ACL/route configuration-state tables**
+(`acl_policies`/`routes`) — the app persists no device config. The DB does hold
+`audit_logs` (the master trail for all modules) plus the `acl_logs`/`route_logs`
+**audit-detail** tables that complement it for ACL/ROUTE execution inspection
+(see Task 9).
 
 Read operations use **Device Session Credentials**: the engineer enters device
 user/password once on the show page; they are held AES-256-GCM-encrypted on the
@@ -60,15 +63,71 @@ adjustment are the new work, plus the frontend (Tasks 7–8).
 - [x] 8. **Dashboard + Log Trail from audit.** `dashboard.service.ts` + `GET /api/dashboard/summary`; `GET /api/audit`, `/api/audit/:id`, `/api/audit/export`. Dashboard page shows execution totals/success/failed/per-module/recent from audit; `/logs` page filters by module/action/status/date/search with a detail view of the 4 JSONB payloads + JSON export. Leftover mock removed (`mock-data.ts` deleted; `useApi` real-only; `api-types.ts` slimmed to re-export shared types). Operator runs `npm run typecheck` + `npm run build`.
   - _Requirements: main 8.8, 8.9, 8.10, 8.11, 9.1–9.7, 12.6, 17.17_
 
+- [x] 9. **ACL/Route audit-detail tables (complement `audit_logs`).** Added two
+  detail tables that hold deeper execution-inspection detail for the sensitive
+  ACL/ROUTE operations, written in the SAME transaction as the master audit row
+  and linked by `audit_id` (FK → `audit_logs.id`, ON DELETE CASCADE) +
+  `correlation_id`. They do NOT replace `audit_logs` — the master trail still
+  records all ACL/ROUTE operations.
+  - `database/schema/acl-logs.ts` — `acl_logs` (id uuid pk, `audit_id` fk,
+    `correlation_id`, `action` SHOW/ADD/DELETE, `status` SUCCESS/FAILED, `device`,
+    `source`, `destination`, `command_preview` jsonb, `execution_meta` jsonb,
+    `response_summary` jsonb, `created_at`; indexes on `audit_id`,
+    `correlation_id`, `created_at`).
+  - `database/schema/route-logs.ts` — `route_logs` (same shape, but `change_ticket`
+    in place of `source`, keeping `destination`; extra index on `change_ticket`).
+  - Registered in `database/schema/index.ts`; shared enums `exec_log_action`
+    (SHOW/ADD/DELETE) and `exec_log_status` (SUCCESS/FAILED); client Zod shapes in
+    `shared/schemas/exec-log.schema.ts`.
+  - Repositories `server/repositories/acl-log.repository.ts` +
+    `route-log.repository.ts`; read services `server/services/acl-log.service.ts`
+    + `route-log.service.ts`.
+  - Read-only endpoints (authenticated, no feature permission, mirroring
+    `/api/audit`): `GET /api/acl-logs`, `/api/acl-logs/correlation/:id`,
+    `/api/route-logs`, `/api/route-logs/correlation/:id`.
+  - All persisted JSONB passes through `redactPayload`; NO credential/password is
+    ever stored. Migration generated + applied (verified in the dev DB).
+  - _Requirements: main 8.1, 8.3, 8.4, 8.5, 8.12; n8n 3, 6, 7, NFR Security_
+
+- [x] 10. **AUTH audit logging + `LOGOUT` enum value.** Every authentication
+  activity is now recorded to `audit_logs` for ALL user types (LOCAL and AD) and
+  ALL roles (including `role_id = null`); previously the audit enums existed but
+  no auth endpoint wrote a row.
+  - `AUTH/LOGIN/SUCCESS` at both MFA session-creation points (`mfa/verify`,
+    `mfa/setup/verify`).
+  - `AUTH/LOGIN/FAILED` on every non-success login path (invalid body,
+    disabled-account gate, no-provider, bad credentials, AD unreachable). The
+    failed-login audit stores only `{ identifier, provider?, reason }` and NEVER
+    a password.
+  - `AUTH/LOGOUT/SUCCESS` on logout (actor resolved before the session is revoked).
+  - Audit writes are best-effort (isolated) so they never change the HTTP response.
+  - Appended `LOGOUT` to `auditActionEnum` (`database/schema/audit-logs.ts`) and
+    `AuditActionSchema` (`shared/schemas/audit.schema.ts`); migration generated +
+    applied. The dev DB `audit_action` enum is now LOGIN, SHOW, ADD, DELETE,
+    UPDATE, LOGOUT.
+  - Master search (`GET /api/audit`) was extended: `audit.repository.listAudit`
+    now LEFT JOINs `users` to also match `display_name` and `email`, not just the
+    username snapshot.
+  - _Requirements: main 1.11, 1.13, 1.15, 8.1; ad-authentication 8.5_
+
 ## Notes
 
 - **RBAC is already in place.** The `ACL_POLICIES_*` and `ROUTES_*` permissions and
   the role mapping are seeded in the dev DB, so tasks only consume `requirePermission`.
-- **No ACL/route tables.** The only app tables are the identity/RBAC/session set +
-  `audit_logs`; all ACL/route state lives on devices and is reached through n8n.
-- **Two migrations in this phase, both generate-only:** `audit_logs` (Task 1, done)
-  and the `sessions` device-credential columns (Task 5). The operator runs
-  `npm run db:migrate`.
+- **No ACL/route config-state tables.** The app persists no `acl_policies`/`routes`
+  configuration rows; all ACL/route *state* lives on devices and is reached through
+  n8n. The app tables are the identity/RBAC/session set + `audit_logs` + the
+  `acl_logs`/`route_logs` audit-detail tables (Task 9), which record execution
+  inspection detail, not device configuration state.
+- **Audit-detail tables complement `audit_logs`.** `acl_logs`/`route_logs` do NOT
+  replace the master audit trail; `audit_logs` still records every ACL/ROUTE
+  operation. Each detail row is written in the SAME transaction as its master
+  audit row and links back via `audit_id` (FK → `audit_logs.id`, ON DELETE CASCADE)
+  + `correlation_id`. All persisted JSONB is redacted — no credential/password.
+- **Migrations in this phase, all generate-only:** `audit_logs` (Task 1, done),
+  the `sessions` device-credential columns (Task 5), the `acl_logs`/`route_logs`
+  detail tables (Task 9), and the `LOGOUT` value appended to the `audit_action`
+  enum (Task 10). The operator runs `npm run db:generate` then `npm run db:migrate`.
 - **Read auto-fill, add/delete manual.** Device Session Credentials auto-fill only
   show/list/search/detail; add/delete keep per-operation credentials.
 - **Payload/response shapes are flexible.** They live in JSONB and may be tuned to
@@ -92,28 +151,27 @@ confirming contract details. Captured so a new session can continue.
    `ACL_POLICIES_*` / `ROUTES_*` permissions (NOC / L2_ENGINEER / ADMINISTRATOR are
    seeded). A user with `role_id = null` sees the menus gated off.
 
-### B. Confirm against the real n8n contract (affects results, not compilation)
+### B. n8n contract — CONFIRMED and wired (ACL + route, show/add/delete)
 
-4. **Request body field names.** The app sends, for show:
-   `{ module, action, correlationId, search, execUsername, execPassword }`; for
-   add/delete: the form fields (name, source, sourceMask, destination,
-   destinationMask, protocol, port, action, timeRange, changeTicket, description /
-   route: name, destination, source, nextHop, policy, timeRange, changeTicket) plus
-   `execUsername`/`execPassword`. n8n must read these exact names, or we adjust the
-   shared Zod schemas (`shared/schemas/acl.schema.ts`, `route.schema.ts`) + the
-   payload built in `server/services/{acl,route}.service.ts`.
-5. **Response shape the app normalizes** (`server/network/n8n-client.ts` →
-   `normalize()`): success `{ device, output, execution? }`; failure `{ device, error }`
-   or non-2xx; if n8n echoes `correlationId` it must equal the one sent (mismatch →
-   FAILED). If the real shape differs, update `normalize()`.
-6. **Show output rendering.** The ACL/Route search pages currently render `output`
-   as raw text in a terminal box. If n8n returns a structured list (e.g.
-   `{ device, items: [...] }`), add a parser + table rendering in
-   `app/pages/{acl,routes}/index.vue`.
-7. **Command preview templates are placeholders.** `server/network/command-templates.ts`
-   uses generic Cisco-like syntax (`access-list ...`, `ip route ...`). Replace with
-   the real device commands so the engineer's preview is accurate. Preview-only —
-   not sent to n8n.
+4. **Request body field names (confirmed).** All calls send credentials as
+   `user`/`pass`; correlation id is the `x-correlation-id` header, not the body.
+   - acl/show: `{ user, pass, source }`
+   - acl/add, acl/delete: `{ user, pass, source, destination }` (joined `"IP MASK"`)
+   - route/show: `{ user, pass }` (show-all)
+   - route/add, route/delete: `{ user, pass, destination }` (joined `"IP MASK"`)
+   The forms collect masks separately + an optional changeTicket (audited only).
+   Schemas: `shared/schemas/{acl,route}.schema.ts`; mapping in
+   `server/services/{acl,route}.service.ts` (`joinAddr`).
+5. **Response shapes the app normalizes** (`server/network/n8n-client.ts` →
+   `normalize()`): show `{ success, found?, total, data[], message }`;
+   add/delete `{ success, operation, sshCode, reachedDevice, message, error }`.
+   `success` drives SUCCESS/FAILED; `error` (fallback `message`) is surfaced on failure.
+6. **Show output rendering (done).** ACL show renders a table (ACL Name / Action /
+   Protocol / Source / Destination / Service). Route show renders Destination /
+   Mask / Gateway + click-row → raw command box, filtered client-side.
+7. **Command preview templates** (`server/network/command-templates.ts`) use
+   generic Cisco-like syntax aligned to the joined IP MASK fields. Preview-only —
+   not sent to n8n; refine to exact device syntax as needed.
 
 ### C. Optional / not blocking
 
@@ -146,11 +204,25 @@ confirming contract details. Captured so a new session can continue.
 - Response `{ success, total, data[], message }` is normalized: `success`→status,
   `data[]`→`items`, and the ACL search page renders a table (ACL Name / Action /
   Protocol / Source / Destination / Service), raw text as fallback.
-- **route/show confirmed**: body `{ user, pass, source }`; response
-  `{ success, total, data[], message }` with rows `{ raw, interface, destination,
-  mask, gateway, metric }`. Route search page renders a fixed table (Interface /
-  Destination / Mask / Gateway / Metric) + click-row → raw command box (same as ACL).
-- Still pending confirmation: the **add/delete** request/response contracts (ACL & route).
+- **route/show confirmed (show-all)**: body `{ user, pass }` (no search); response
+  `{ success, found, total, data[], message }` with rows `{ raw, interface,
+  destination, mask, gateway, metric }`. Route page shows **Destination / Mask /
+  Gateway** + click-row → raw command box, and filters the rows client-side.
+- **ACL & route add/delete confirmed**: body `{ user, pass, source, destination }`
+  (ACL) / `{ user, pass, destination }` (route), destination/source joined `"IP MASK"`.
+  Response `{ success, operation, sshCode, reachedDevice, message, error }`.
+
+### Added this phase (beyond the original n8n scope)
+
+- **Existence pre-check** before add/delete (`app/composables/useOpsPrecheck.ts`):
+  ADD blocks if the entry already exists; DELETE blocks if it does not. ACL matches
+  source+destination; route matches the route IP against `destination`.
+- **Locked IP / mask inputs** (`app/components/IpInput.vue`, `MaskInput.vue`):
+  digits+dots only, ≤255 per octet, max 4 octets; IP shows a valid/invalid badge
+  and blocks submit when invalid; mask shows a live `/CIDR` badge (`/?` when
+  malformed). Helpers in `shared/schemas/network.schema.ts`
+  (`isValidIpv4`, `maskToCidr`, `sanitizeIpv4Input`, `SUBNET_MASKS`).
+- **ACL/route endpoints are singular**: `/api/acl/*` and `/api/route/*`.
 
 ### Suggested first steps next session
 

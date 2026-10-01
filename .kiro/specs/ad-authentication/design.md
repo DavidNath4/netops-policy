@@ -234,7 +234,7 @@ New typed errors, mapped centrally to the API envelope:
 | Existing account `is_active = false` | `ACCOUNT_DISABLED` | 403 | Front-of-flow, before any AD bind; Frontend shows the "account disabled — contact admin" dialog (Req 4.2). |
 | AD unreachable / service bind fails / timeout / TLS | `AD_UNREACHABLE` | 503 | Includes a safe identifier such as the connection error code (`ECONNREFUSED`, `ETIMEDOUT`); no internal detail leaked (Req 8.2, 8.3). |
 
-The disabled-account and unreachable responses are the only two that deviate from the uniform invalid-credentials response (Req 8.6). No response ever includes the bind DN, bind password, user password, LDAP raw messages, stack traces, or paths (Req 8.3, NFR Sec 2). Audit records LOGIN_SUCCESS / LOGIN_FAILED for AD identically to LOCAL, never storing a password (Req 8.5).
+The disabled-account and unreachable responses are the only two that deviate from the uniform invalid-credentials response (Req 8.6). No response ever includes the bind DN, bind password, user password, LDAP raw messages, stack traces, or paths (Req 8.3, NFR Sec 2). Audit records LOGIN_SUCCESS / LOGIN_FAILED for AD identically to LOCAL, never storing a password (Req 8.5). This auth auditing is now implemented for all account origins and roles (including `role_id = null`); logout is recorded as an `AUTH/LOGOUT` entry via the shared, unchanged logout endpoint (main spec Req 8.1). A failed-login audit stores only `{ identifier, provider?, reason }`.
 
 ## Security considerations
 

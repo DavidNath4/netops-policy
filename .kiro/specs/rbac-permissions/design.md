@@ -189,18 +189,21 @@ No function branches on `role_code`; decisions read only from the resolved set (
 
 ### Endpoint → permission map (this phase)
 
+The ACL/Route endpoints are n8n-ops (not REST CRUD) and singular. `preview`/`execute`
+require `*_ADD` or `*_DELETE` resolved from the request's `operation` field.
+
 | Method | Path | Required permission |
 |---|---|---|
-| GET | `/api/acl`, `/api/acl/:id` | `ACL_POLICIES_SHOW` |
-| POST | `/api/acl` | `ACL_POLICIES_ADD` |
-| DELETE | `/api/acl/:id` | `ACL_POLICIES_DELETE` |
-| GET | `/api/routes`, `/api/routes/:id` | `ROUTES_SHOW` |
-| POST | `/api/routes` | `ROUTES_ADD` |
-| DELETE | `/api/routes/:id` | `ROUTES_DELETE` |
+| POST | `/api/acl/show` | `ACL_POLICIES_SHOW` |
+| POST | `/api/acl/preview`, `/api/acl/execute` | `ACL_POLICIES_ADD` (op=ADD) / `ACL_POLICIES_DELETE` (op=DELETE) |
+| POST | `/api/route/show` | `ROUTES_SHOW` |
+| POST | `/api/route/preview`, `/api/route/execute` | `ROUTES_ADD` (op=ADD) / `ROUTES_DELETE` (op=DELETE) |
 | GET | `/api/users`, `/api/users/:id` | `ADMINISTRATION_SHOW` |
-| POST/PATCH/DELETE user mgmt | `/api/users*` | `ADMINISTRATION_MANAGE` |
+| PATCH | `/api/users/:id` (name), `/api/users/:id/role`, `/api/users/:id/status` | `ADMINISTRATION_MANAGE` |
+| POST | `/api/users` (create), `/api/users/:id/reset-password` | `ADMINISTRATION_MANAGE` — **DISABLED in dev** (reject 403; accounts come from AD, passwords managed in AD) |
 | GET | `/api/dashboard/summary` | valid session only |
 | GET | `/api/audit*` (Log Trail) | valid session only |
+| GET | `/api/acl-logs*`, `/api/route-logs*` (ACL/route audit detail) | valid session only |
 
 ### Frontend gating
 

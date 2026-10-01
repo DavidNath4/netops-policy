@@ -17,7 +17,7 @@ Design principles carried from the main spec:
 ### Where it sits
 
 ```
-Vue form ──POST /api/{acl|routes}/{show|preview|execute}──▶ Nitro handler
+Vue form ──POST /api/{acl|route}/{show|preview|execute}──▶ Nitro handler
                                                               │ requirePermission
                                                               ▼
                                                         AclService / RouteService
@@ -98,64 +98,79 @@ The client never throws credential-bearing errors upward; the `error` string is 
 
 ## Field payloads per operation (Req 4)
 
-The app sends the operator's validated fields plus `correlationId` and the execution credentials. Field sets are the app↔n8n contract and may be tuned; the audit columns do not change when they do (Req 4.7). Example bodies (illustrative — the credential fields are sent to n8n but redacted before any preview/audit):
+> **Current contract (source of truth = code).** The n8n webhooks take a small,
+> fixed body per operation. The URL is per-operation (`<base>/<module>/<action>`,
+> lowercase, singular `acl`/`route`); the correlation id travels in the
+> `x-correlation-id` header, not the body. The browser form collects more fields
+> than the webhook needs (masks are entered separately, a change ticket, etc.),
+> but the service maps them down to the contract below before calling n8n.
+> `source`/`destination` are **joined `"IP MASK"` strings** (a missing mask
+> defaults to `255.255.255.255`). Credential fields are sent to n8n but redacted
+> to `***` in every preview/audit copy.
 
-**ACL ADD**
+**ACL ADD / DELETE** — `POST <base>/acl/add` · `<base>/acl/delete`. Body:
 ```json
 {
-  "module": "ACL",
-  "action": "ADD",
-  "correlationId": "3f1c…",
-  "name": "KSEI-JMP",
-  "source": "10.100.100.100",
-  "source_mask": "255.255.255.255",
-  "destination": "10.200.200.200",
-  "destination_mask": "255.255.255.255",
-  "protocol": "TCP",
-  "port": 443,
-  "action_type": "ALLOW",
-  "time_range": "31-May-26",
-  "change_ticket": "CHG-123456",
-  "execUsername": "engineer1",
-  "execPassword": "…"
+  "user": "Busisa.Bhp",
+  "pass": "…",
+  "source": "10.100.100.100 255.255.255.255",
+  "destination": "10.200.200.200 255.255.255.255"
 }
 ```
+The form fields are `source`, `sourceMask`, `destination`, `destinationMask`,
+and an optional `changeTicket` (audited, not sent to n8n). The service joins
+IP + mask into the `source`/`destination` strings above.
 
-**ACL SHOW** — confirmed contract (`POST <base>/acl/show`). Body is exactly:
+**ACL SHOW** — `POST <base>/acl/show`. Body is exactly:
 ```json
 { "user": "Busisa.Bhp", "pass": "…", "source": "10.71.34.107" }
 ```
-No `module`/`action`/`correlationId` in the body (the URL is per-operation; the
-correlation id is sent as the `x-correlation-id` header for tracing). Response:
-```json
-{ "success": true, "total": 2, "data": [ { "raw": "access-list AWS-LAB extended permit ip host 10.71.34.107 host 10.100.100.100",
-  "aclName": "AWS-LAB", "action": "permit", "protocol": "ip",
-  "source": { "type": "host", "value": "10.71.34.107" },
-  "destination": { "type": "host", "value": "10.100.100.100" }, "service": null } ], "message": "ACL found" }
-```
-The client maps `success`→status, `data[]`→`items` (rendered as a table:
-ACL Name / Action / Protocol / Source / Destination / Service), `total`, `message`.
-The device credentials come from the Device Session Credentials (`user`/`pass`),
-not the request body from the browser.
+Response maps `success`→status, `data[]`→`items` (table: ACL Name / Action /
+Protocol / Source / Destination / Service), `total`, `message`.
 
-**ROUTE ADD**
+**ROUTE ADD / DELETE** — `POST <base>/route/add` · `<base>/route/delete`. Body:
 ```json
 {
-  "module": "ROUTE",
-  "action": "ADD",
-  "correlationId": "9a2e…",
-  "name": "to-dc2",
-  "destination": "10.200.0.0/16",
-  "next_hop": "10.71.34.1",
-  "policy": "default",
-  "time_range": "31-May-26",
-  "change_ticket": "CHG-123457",
-  "execUsername": "engineer1",
-  "execPassword": "…"
+  "user": "Busisa.Bhp",
+  "pass": "…",
+  "destination": "10.100.100.100 255.255.255.255"
 }
 ```
+The form fields are `routeIp`, `routeMask`, and an optional `changeTicket`; the
+service joins them into the single `destination` string.
 
-Delete payloads carry the identifying fields (ACL: name/source/destination; route: destination/next_hop) plus the ticket, correlation id, and credentials (Req 4.3, 4.5).
+**ROUTE SHOW** — `POST <base>/route/show`. **Show-all**: body is only
+`{ "user": "…", "pass": "…" }` (no search value in the contract). The webhook
+returns the full route table; the UI filters it client-side. Response:
+```json
+{ "success": true, "found": true, "total": 1, "data": [
+  { "raw": "route LAB-AWS 10.100.100.100 255.255.255.255 10.100.100.5 1",
+    "interface": "LAB-AWS", "destination": "10.100.100.100",
+    "mask": "255.255.255.255", "gateway": "10.100.100.5", "metric": 1 } ],
+  "message": "Route found" }
+```
+The route table shows **Destination / Mask / Gateway** columns; the selected
+row's `raw` command is shown in a RawCommandBox. The device credentials for all
+show calls come from the Device Session Credentials (`user`/`pass`), not the
+browser body.
+
+Field sets are the app↔n8n contract and may be tuned without changing the fixed
+audit columns (Req 4.7). Fields removed from the earlier draft (ACL
+name/protocol/port/action/time_range; route name/next_hop/policy/time_range) are
+not part of the current dev-phase contract and are added back only if the
+webhooks require them.
+
+### Add/Delete existence pre-check
+
+Before an add/delete is previewed/executed, the UI runs a client-side existence
+check via the module's show endpoint (`useOpsPrecheck`):
+
+- **ADD** blocks with a warning if the entry **already exists** (nothing to add).
+- **DELETE** blocks with a warning if the entry **does not exist** (nothing to delete).
+
+Matchers are per module: ACL matches the **source + destination pair**; Route
+matches the **route IP** against each row's `destination`. This is a UI
+guardrail (defense-in-depth); the server still re-validates and audits.
 
 ## Response contract & normalization (Req 5)
 
@@ -171,11 +186,21 @@ n8n responses are flexible; the client tolerates variation and normalizes. Recog
 { "device": "10.71.34.1", "error": "SSH connection timeout" }
 ```
 
+**Route add/delete (confirmed shape).** The route webhooks return a flag-driven
+result the client normalizes by `success`:
+```json
+{ "success": true,  "operation": "add",    "sshCode": 255, "reachedDevice": true, "message": "Route add command accepted",     "error": null }
+{ "success": false, "operation": "delete", "sshCode": 255, "reachedDevice": true, "message": "ASA rejected route delete command", "error": "ERROR: %No matching route to delete" }
+```
+`success: false` → FAILED, surfacing `error` (fallback `message`). The extra
+fields (`operation`, `sshCode`, `reachedDevice`) are carried in the response
+payload but do not change the normalized status.
+
 The client maps these to `N8nResult`. The service then writes the audit log (below). Device output is treated as untrusted for display/parsing (Req 5.5); a structured parser is optional and additive (Req 5.6).
 
-## Audit mapping (Req 6, and main spec Req 8)
+## Audit mapping (Req 6, Req 12, and main spec Req 8)
 
-For one show/execute, the service records one `audit_logs` row:
+For one show/execute, the service records one master `audit_logs` row (and, for ACL/ROUTE, optionally one detail row — see "ACL/Route audit-detail tables" below):
 
 | Audit field | Source |
 |---|---|
@@ -190,6 +215,48 @@ For one show/execute, the service records one `audit_logs` row:
 | `response_payload` | `{ device, output }` or `{ device, error }` |
 
 Missing/partial execution metadata does not fail the write (Req 6.4). Redaction runs before the write, so no payload ever contains cleartext credentials (Req 7.2, 7.4).
+
+## ACL/Route audit-detail tables (Req 12)
+
+`audit_logs` remains the system-of-record and records **all** modules, including every ACL and ROUTE operation. On top of it, two **audit-detail** tables — `acl_logs` and `route_logs` — hold deeper execution-inspection detail for the sensitive ACL/ROUTE operations. They **complement** `audit_logs`; they do not replace it, and they are **not** ACL/route configuration-state tables (the app still stores no device config and still delegates execution to n8n).
+
+Each detail row is written in the **same DB transaction** as its master `audit_logs` row (so a detail row never exists without its master) and links back to it two ways: by `audit_id` (FK → `audit_logs.id`, `ON DELETE CASCADE`) and by the operation's `correlation_id`.
+
+```
+server/services/acl.service.ts / route.service.ts
+   └─ one tx ─▶ insert audit_logs (master, redacted)         ──▶ audit.id
+               └─▶ insert acl_logs / route_logs (detail, redacted, audit_id, correlation_id)
+```
+
+### Schema
+
+```
+database/schema/acl-logs.ts     → acl_logs
+database/schema/route-logs.ts   → route_logs
+database/schema/index.ts        → re-export + shared enums exec_log_action / exec_log_status
+shared/schemas/exec-log.schema.ts → client Zod shapes
+```
+
+Shared enums: `exec_log_action` (`SHOW` | `ADD` | `DELETE`), `exec_log_status` (`SUCCESS` | `FAILED`).
+
+**`acl_logs`** columns: `id` (uuid pk), `audit_id` (fk → `audit_logs.id`, cascade), `correlation_id`, `action` (exec_log_action), `status` (exec_log_status), `device`, `source`, `destination`, `command_preview` (jsonb), `execution_meta` (jsonb), `response_summary` (jsonb), `created_at`. Indexes: `audit_id`, `correlation_id`, `created_at`.
+
+**`route_logs`** columns: identical to `acl_logs` except `change_ticket` replaces `source` (and is indexed) while `destination` is kept. Indexes: `audit_id`, `correlation_id`, `created_at`, `change_ticket`.
+
+All three JSONB columns pass through `redactPayload` before the write, so a detail row — like the master row — never contains a credential or password (Req 12.7).
+
+### Read path
+
+Repositories `server/repositories/acl-log.repository.ts` + `route-log.repository.ts` (insert + paginated query + by-correlation lookup; no delete/mutate) feed read services `server/services/acl-log.service.ts` + `route-log.service.ts`. The read-only, authenticated endpoints (no feature permission, mirroring `/api/audit`) are:
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| GET | `/api/acl-logs` | valid session | Paginated ACL execution-detail list. |
+| GET | `/api/acl-logs/correlation/:id` | valid session | ACL detail rows for one correlation id. |
+| GET | `/api/route-logs` | valid session | Paginated route execution-detail list. |
+| GET | `/api/route-logs/correlation/:id` | valid session | Route detail rows for one correlation id. |
+
+The Log Trail detail modal uses the by-correlation endpoints to show an "Execution Inspection" section for ACL/ROUTE audit rows. There is no endpoint that deletes or mutates detail rows (Req 12.9). This added one generate+migrate step (`db:generate` → `db:migrate`), applied and verified in the dev DB.
 
 ## Redaction (Req 7)
 
@@ -212,21 +279,22 @@ export function redactText(text: string, creds: { execUsername?: string; execPas
 
 ```typescript
 // server/network/command-templates.ts — illustrative shapes, kept aligned with n8n's intent.
-export const ACL_ADD_TEMPLATE = (f) => [
+// src/dst are joined "IP MASK" strings (mask optional).
+export const renderAclAdd = (f) => [
   `terminal pager 0`,
-  `access-list ${f.name} permit ${f.protocol.toLowerCase()} ${f.source} ${f.source_mask ?? ''} ${f.destination} ${f.destination_mask ?? ''}${f.port ? ' eq ' + f.port : ''}`.trim(),
+  `access-list extended permit ip ${f.source} ${f.sourceMask ?? ''} ${f.destination} ${f.destinationMask ?? ''}`.replace(/\s+/g, ' ').trim(),
   `exit`,
 ]
-export const ACL_DELETE_TEMPLATE = (f) => [
+export const renderAclDelete = (f) => [
   `terminal pager 0`,
-  `no access-list ${f.name} permit ip ${f.source} ${f.destination}`,
+  `no access-list extended permit ip ${f.source} ${f.sourceMask ?? ''} ${f.destination} ${f.destinationMask ?? ''}`.replace(/\s+/g, ' ').trim(),
   `exit`,
 ]
-export const ROUTE_ADD_TEMPLATE = (f) => [
-  `ip route ${f.destination} ${f.next_hop}`,
+export const renderRouteAdd = (f) => [
+  `ip route ${f.routeIp}${f.routeMask ? ' ' + f.routeMask : ''}`,
 ]
-export const ROUTE_DELETE_TEMPLATE = (f) => [
-  `no ip route ${f.destination}${f.next_hop ? ' ' + f.next_hop : ''}`,
+export const renderRouteDelete = (f) => [
+  `no ip route ${f.routeIp}${f.routeMask ? ' ' + f.routeMask : ''}`,
 ]
 ```
 
@@ -375,7 +443,7 @@ Unit and integration tests use Vitest with the N8N_Client (or global `fetch`) mo
 ## Boundaries (what this design does NOT do)
 
 - It does not define or host the n8n workflows; it only calls their webhooks per this contract.
-- It does not store the device SSH credentials configured inside n8n, nor ACL/route configuration state. The read-path Device_Session_Credentials are a separate, encrypted, session-scoped, expiring convenience.
+- It does not store the device SSH credentials configured inside n8n, nor ACL/route configuration state. (The `acl_logs`/`route_logs` tables above are audit detail — what an operation did — not configuration state.) The read-path Device_Session_Credentials are a separate, encrypted, session-scoped, expiring convenience.
 - It does not send or execute rendered command strings; n8n composes the command from the field payload.
 - It does not auto-retry configuration-changing operations beyond the guardrail in Requirement 8.5.
 - It does not auto-fill add/delete from the Device_Session_Credentials.
