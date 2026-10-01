@@ -22,4 +22,13 @@ export function createDatabase(databaseUrl: string) {
 }
 
 export type Database = ReturnType<typeof createDatabase>['db']
+
+/**
+ * A database handle OR an open transaction. The callback passed to
+ * `db.transaction(...)` receives a `tx` that lacks `$client`, so repository and
+ * service functions that must run either standalone or inside a transaction
+ * should accept this wider type instead of `Database`.
+ */
+export type DbOrTx = Database | Parameters<Parameters<Database['transaction']>[0]>[0]
+
 export { schema }

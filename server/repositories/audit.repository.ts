@@ -1,7 +1,8 @@
-import { and, count, desc, eq, gte, ilike, lte, or } from 'drizzle-orm'
+import { and, count, desc, eq, getTableColumns, gte, ilike, lte, or } from 'drizzle-orm'
 
-import type { Database } from '~~/database'
+import type { Database, DbOrTx } from '~~/database'
 import { auditLogs } from '~~/database/schema/audit-logs'
+import { users } from '~~/database/schema/users'
 
 /**
  * Data-access layer for the `audit_logs` table — the app's system of record.
@@ -15,7 +16,7 @@ export type AuditRow = typeof auditLogs.$inferSelect
 export type InsertAuditLog = typeof auditLogs.$inferInsert
 
 /** Insert one audit row. Values must already be redacted (no raw secrets). */
-export async function insertAudit(db: Database, input: InsertAuditLog): Promise<AuditRow> {
+export async function insertAudit(db: DbOrTx, input: InsertAuditLog): Promise<AuditRow> {
   const [row] = await db.insert(auditLogs).values(input).returning()
   if (!row) {
     throw new Error('Failed to write audit log: no row returned from insert')
@@ -53,24 +54,36 @@ export async function listAudit(
 
   const search = filter.search?.trim()
   if (search) {
+    const like = `%${search}%`
+    // Match the actor's snapshot username/ticket on the audit row AND the
+    // joined user's current display name / email.
     conditions.push(
       or(
-        ilike(auditLogs.username, `%${search}%`),
-        ilike(auditLogs.changeTicket, `%${search}%`),
+        ilike(auditLogs.username, like),
+        ilike(auditLogs.changeTicket, like),
+        ilike(users.displayName, like),
+        ilike(users.email, like),
       ),
     )
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined
 
+  // LEFT JOIN users (auditLogs.userId is nullable for failed logins). The join is
+  // applied unconditionally; with no users-filter it never changes counts/rows,
+  // and it lets `search` also match the joined user's display name / email. We
+  // select ONLY audit columns (getTableColumns) so the row shape stays AuditRow
+  // and toAuditResponse is unchanged.
   const [{ value: total } = { value: 0 }] = await db
     .select({ value: count() })
     .from(auditLogs)
+    .leftJoin(users, eq(auditLogs.userId, users.userId))
     .where(where)
 
   const items = await db
-    .select()
+    .select(getTableColumns(auditLogs))
     .from(auditLogs)
+    .leftJoin(users, eq(auditLogs.userId, users.userId))
     .where(where)
     .orderBy(desc(auditLogs.createdAt))
     .limit(filter.limit)

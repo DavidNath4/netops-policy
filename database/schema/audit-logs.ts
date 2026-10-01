@@ -25,7 +25,7 @@ import { users } from './users'
  * evolving request/response without a migration to the fixed columns.
  */
 export const auditModuleEnum = pgEnum('audit_module', ['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N'])
-export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE'])
+export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY'])
 export const auditStatusEnum = pgEnum('audit_status', ['SUCCESS', 'FAILED'])
 
 export const auditLogs = pgTable(

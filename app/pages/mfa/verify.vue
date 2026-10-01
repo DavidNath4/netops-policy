@@ -25,6 +25,14 @@ onMounted(() => {
 })
 
 async function onVerify(completed?: string) {
+  // Synchronous double-fire guard: the 6-digit input emits `@complete` (auto-
+  // submit on the final digit) AND the form emits `@submit.prevent`, so both can
+  // fire within the same tick. Bailing out here BEFORE any await ensures exactly
+  // one verify request per user action. (After the auth-logging redesign, a full
+  // login legitimately writes LOGIN/SUCCESS + MFA_VERIFY/SUCCESS — two DIFFERENT
+  // actions; the bug was two rows of the SAME action from a duplicated request.)
+  if (submitting.value) return
+
   submitError.value = undefined
   if (expired.value) {
     await navigateTo('/login')

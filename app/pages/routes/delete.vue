@@ -83,12 +83,29 @@ async function onGenerate() {
   }
 }
 
+/** Clear every form field (after a successful execute). */
+function resetFields() {
+  form.routeIp = ''
+  form.routeMask = ''
+  form.changeTicket = ''
+  form.execUsername = ''
+  form.execPassword = ''
+}
+
 async function onExecuteConfirmed() {
   errorMsg.value = null
   executing.value = true
   try {
-    result.value = await api.routeOps.execute(buildPayload())
+    const res = await api.routeOps.execute(buildPayload())
     confirmOpen.value = false
+    // On success, clear the form fields. The form watcher wipes `result`/`preview`
+    // when the fields change, so re-assign `result` after the reset settles to
+    // keep the success/failure output visible on an emptied form.
+    if (res.status === 'SUCCESS') {
+      resetFields()
+      await nextTick()
+    }
+    result.value = res
   }
   catch (e) {
     confirmOpen.value = false

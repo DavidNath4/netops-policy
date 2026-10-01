@@ -17,6 +17,7 @@ import type { AclExecuteInput, AclPreviewInput } from '#shared/schemas/acl.schem
 import type { RouteExecuteInput, RoutePreviewInput } from '#shared/schemas/route.schema'
 import type { DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8n.schema'
 import type { AuditResponse } from '#shared/schemas/audit.schema'
+import type { AclLogResponse, RouteLogResponse } from '#shared/schemas/exec-log.schema'
 
 /** Activity/execution dashboard summary (server: dashboard.service.ts). */
 interface DashboardSummary {
@@ -120,6 +121,26 @@ export function useApi() {
       },
       export(params?: Record<string, unknown>): Promise<AuditResponse[]> {
         return apiGet<AuditResponse[]>('/api/audit/export', params)
+      },
+    },
+
+    // ACL execution-inspection detail logs (complement to audit_logs).
+    aclLogs: {
+      list(params?: Record<string, unknown>): Promise<Paginated<AclLogResponse>> {
+        return apiGet<Paginated<AclLogResponse>>('/api/acl-logs', params)
+      },
+      byCorrelation(correlationId: string): Promise<AclLogResponse[]> {
+        return apiGet<AclLogResponse[]>(`/api/acl-logs/correlation/${correlationId}`)
+      },
+    },
+
+    // ROUTE execution-inspection detail logs (complement to audit_logs).
+    routeLogs: {
+      list(params?: Record<string, unknown>): Promise<Paginated<RouteLogResponse>> {
+        return apiGet<Paginated<RouteLogResponse>>('/api/route-logs', params)
+      },
+      byCorrelation(correlationId: string): Promise<RouteLogResponse[]> {
+        return apiGet<RouteLogResponse[]>(`/api/route-logs/correlation/${correlationId}`)
       },
     },
 

@@ -4,8 +4,9 @@ import type { Database } from '~~/database'
 import { callN8n } from '../network/n8n-client'
 import { buildRoutePreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
+import { insertRouteLog } from '../repositories/route-log.repository'
 import type { AuditContext } from '../utils/audit-context'
-import { record } from './audit.service'
+import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import type { RouteExecuteInput } from '#shared/schemas/route.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
@@ -62,22 +63,47 @@ export async function routeShow(
     },
   })
 
-  await record(db, {
-    ...ctx,
-    module: 'ROUTE',
-    action: 'SHOW',
-    status: result.status,
-    correlationId,
-    // route/show is show-all; no search value is part of the contract.
-    requestPayload: null,
-    executionPayload: result.execution ?? null,
-    responsePayload: {
-      total: result.total ?? null,
-      items: result.items ?? null,
-      message: result.message ?? null,
-      error: result.error ?? null,
+  // Master audit row + route_logs detail row, written atomically.
+  await recordWithDetail(
+    db,
+    {
+      ...ctx,
+      module: 'ROUTE',
+      action: 'SHOW',
+      status: result.status,
+      correlationId,
+      // route/show is show-all; the only non-secret part is the RAW n8n request
+      // body (user/pass), which record()'s deep redactPayload masks.
+      requestPayload: { n8nRequest: result.raw.request },
+      executionPayload: result.execution ?? null,
+      responsePayload: {
+        total: result.total ?? null,
+        items: result.items ?? null,
+        message: result.message ?? null,
+        error: result.error ?? null,
+        n8nResponse: result.raw.response,
+      },
     },
-  })
+    async (tx, auditId) => await insertRouteLog(tx, {
+      auditId,
+      correlationId,
+      action: 'SHOW',
+      status: result.status,
+      device: result.device ?? null,
+      // ROUTE SHOW is show-all: no destination, no change ticket.
+      destination: null,
+      changeTicket: null,
+      // SHOW has no command preview.
+      commandPreview: null,
+      // Defense-in-depth: metadata/summary passed through redactPayload.
+      executionMeta: redactPayload(result.execution ?? null),
+      responseSummary: redactPayload({
+        total: result.total ?? null,
+        message: result.message ?? null,
+        error: result.error ?? null,
+      }),
+    }),
+  )
 
   return toOperationResult(correlationId, result)
 }
@@ -96,8 +122,8 @@ export async function routeExecute(
   const correlationId = randomUUID()
   const preview = buildRoutePreview(input)
 
-  // n8n route/add & route/delete contract: { user, pass, destination }, where
-  // destination is a joined "IP MASK" string.
+  // n8n route/add & route/delete contract: { user, pass, routeIp }, where
+  // routeIp is a joined "IP MASK" string (confirmed against the live n8n webhook).
   const result = await callN8n({
     module: 'ROUTE',
     action: input.operation,
@@ -105,28 +131,55 @@ export async function routeExecute(
     body: {
       user: input.execUsername,
       pass: input.execPassword,
-      destination: joinAddr(input.routeIp, input.routeMask),
+      routeIp: joinAddr(input.routeIp, input.routeMask),
     },
   })
 
-  await record(db, {
-    ...ctx,
-    module: 'ROUTE',
-    action: input.operation,
-    status: result.status,
-    changeTicket: input.changeTicket ?? null,
-    correlationId,
-    requestPayload: redactPayload({ ...input }),
-    commandPayload: { command: preview.command },
-    executionPayload: result.execution ?? null,
-    responsePayload: {
-      total: result.total ?? null,
-      items: result.items ?? null,
-      message: result.message ?? null,
-      output: result.output ?? null,
-      error: result.error ?? null,
+  // Master audit row + route_logs detail row, written atomically.
+  await recordWithDetail(
+    db,
+    {
+      ...ctx,
+      module: 'ROUTE',
+      action: input.operation,
+      status: result.status,
+      changeTicket: input.changeTicket ?? null,
+      correlationId,
+      // The RAW n8n request body (user/pass) is masked by record()'s deep
+      // redactPayload before storage.
+      requestPayload: redactPayload({ ...input, n8nRequest: result.raw.request }),
+      commandPayload: { command: preview.command },
+      executionPayload: result.execution ?? null,
+      responsePayload: {
+        total: result.total ?? null,
+        items: result.items ?? null,
+        message: result.message ?? null,
+        output: result.output ?? null,
+        error: result.error ?? null,
+        n8nResponse: result.raw.response,
+      },
     },
-  })
+    async (tx, auditId) => await insertRouteLog(tx, {
+      auditId,
+      correlationId,
+      action: input.operation,
+      status: result.status,
+      device: result.device ?? null,
+      // ROUTE EXECUTE: the human-readable "IP MASK" destination the user sees.
+      destination: joinAddr(input.routeIp, input.routeMask),
+      changeTicket: input.changeTicket ?? null,
+      // preview.command lines are already credential-free; pass through
+      // redactPayload for defense-in-depth.
+      commandPreview: redactPayload(preview.command),
+      executionMeta: redactPayload(result.execution ?? null),
+      responseSummary: redactPayload({
+        total: result.total ?? null,
+        message: result.message ?? null,
+        output: result.output ?? null,
+        error: result.error ?? null,
+      }),
+    }),
+  )
 
   return toOperationResult(correlationId, result)
 }

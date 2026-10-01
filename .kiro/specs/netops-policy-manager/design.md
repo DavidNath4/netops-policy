@@ -281,13 +281,35 @@ export const authProviderEnum = pgEnum('auth_provider', ['LOCAL', 'AD']);   // a
 export const mfaTypeEnum      = pgEnum('mfa_type',      ['TOTP']);          // second-factor type (user_mfa)
 // User active/disabled state is a boolean `users.is_active`, not an enum.
 export const auditModuleEnum = pgEnum('audit_module', ['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']);   // Req 8.1
-export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT']); // Req 8.1 (LOGOUT appended by migration; dev DB order: LOGIN, SHOW, ADD, DELETE, UPDATE, LOGOUT)
+export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY']); // Req 8.1 (LOGOUT then MFA_VERIFY appended by migration; dev DB order: LOGIN, SHOW, ADD, DELETE, UPDATE, LOGOUT, MFA_VERIFY)
 // Audit-detail (acl_logs/route_logs) enums — complement audit_logs for ACL/ROUTE
 // execution inspection (n8n Integration spec, Req 12).
 export const execLogActionEnum = pgEnum('exec_log_action', ['SHOW', 'ADD', 'DELETE']);
 export const execLogStatusEnum = pgEnum('exec_log_status', ['SUCCESS', 'FAILED']);
 export const auditStatusEnum = pgEnum('audit_status', ['SUCCESS', 'FAILED']);                     // Req 8.2
 ```
+
+**AUTH logging flow (two-row login).** Authentication is audited as two distinct
+actions so first and second factor are distinguishable:
+
+- First factor OK (password / AD bind verified, before the MFA challenge) →
+  `AUTH / LOGIN / SUCCESS` (written in `login.post.ts`).
+- Second factor OK (TOTP verified, session created) → `AUTH / MFA_VERIFY /
+  SUCCESS` (written in the MFA verify endpoints). A full successful login is
+  therefore TWO rows: `LOGIN/SUCCESS` + `MFA_VERIFY/SUCCESS`.
+- Second factor fails (invalid/expired code, invalid challenge) → TWO rows:
+  `AUTH / MFA_VERIFY / FAILED` + `AUTH / LOGIN / FAILED` (same correlation id).
+- First factor fails (bad credentials, disabled account, directory unreachable,
+  no provider, invalid body) → `AUTH / LOGIN / FAILED` only.
+- Logout → `AUTH / LOGOUT / SUCCESS`.
+
+All auth audit writes are best-effort (never alter the HTTP status/body) and
+never persist a password or the submitted TOTP code.
+
+**USER administration audit.** Role change and account activate/deactivate are
+recorded as `USER / UPDATE` (SUCCESS/FAILED). The acting admin is the audit
+actor; the target user and change detail live in `request_payload`, discriminated
+by `kind` (`ROLE_CHANGE` / `STATUS_CHANGE`). No password is ever included.
 
 There are **no** `acl_status`, `route_status`, `protocol`, or `acl_action` database enums — ACL/route data is never persisted. Protocol/action/status choices for ACL/route *input* are enforced by Zod on the form and server (see Zod schemas below), not by a DB enum.
 
@@ -442,7 +464,7 @@ export const auditLogs = pgTable('audit_logs', {
   username: varchar('username', { length: 150 }),          // snapshot at action time (Req 8.2)
   userRole: varchar('user_role', { length: 100 }),         // snapshot at action time
   module: auditModuleEnum('module').notNull(),             // AUTH | USER | ACL | ROUTE | N8N (Req 8.1)
-  action: auditActionEnum('action').notNull(),             // LOGIN | SHOW | ADD | DELETE | UPDATE (Req 8.1)
+  action: auditActionEnum('action').notNull(),             // LOGIN | SHOW | ADD | DELETE | UPDATE | LOGOUT | MFA_VERIFY (Req 8.1)
   status: auditStatusEnum('status').notNull(),             // SUCCESS | FAILED (Req 8.6)
   sourceIp: varchar('source_ip', { length: 64 }),
   userAgent: varchar('user_agent', { length: 512 }),
@@ -702,7 +724,7 @@ export const PaginationQuerySchema = z.object({
 
 export const AuditQuerySchema = PaginationQuerySchema.extend({
   module: z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']).optional(),  // Req 8.8
-  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT']).optional(),
+  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY']).optional(),
   status: z.enum(['SUCCESS', 'FAILED']).optional(),
   correlationId: z.string().uuid().optional(),   // pull the whole trail of one operation
   from: z.string().optional(),                   // date filter (Req 8.8)
@@ -722,7 +744,7 @@ export const AuditResponseSchema = z.object({
   username: z.string().nullable(),
   userRole: z.string().nullable(),
   module: z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']),
-  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT']),
+  action: z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY']),
   status: z.enum(['SUCCESS', 'FAILED']),
   sourceIp: z.string().nullable(),
   userAgent: z.string().nullable(),

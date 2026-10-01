@@ -10,7 +10,7 @@ import { CorrelationIdSchema, PaginationQuerySchema } from './common.schema'
 export const AuditModuleSchema = z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N'])
 export type AuditModule = z.infer<typeof AuditModuleSchema>
 
-export const AuditActionSchema = z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE'])
+export const AuditActionSchema = z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY'])
 export type AuditAction = z.infer<typeof AuditActionSchema>
 
 export const AuditStatusSchema = z.enum(['SUCCESS', 'FAILED'])

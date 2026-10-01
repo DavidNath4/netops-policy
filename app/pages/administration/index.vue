@@ -23,6 +23,17 @@ const toast = useToast()
 
 const canManage = computed(() => can('ADMINISTRATION_MANAGE'))
 
+// User creation is disabled for now (server rejects POST /api/users too).
+// Flip to true to show the "Add User" button again.
+const canCreateUser = computed(() => false)
+
+// Current signed-in user — used to hide the "Disable" action on your own row
+// (the server also refuses a self-disable; this keeps the UI from offering it).
+const { user: currentUser } = useAuth()
+function isSelf(user: AdminUserResponse): boolean {
+  return currentUser.value?.userId === user.userId
+}
+
 // ---------------------------------------------------------------------------
 // List state + loading
 // ---------------------------------------------------------------------------
@@ -255,76 +266,27 @@ async function confirmDisable() {
 }
 
 // ---------------------------------------------------------------------------
-// Reset Password — ConfirmDialog to confirm, then the new-password form
-// ---------------------------------------------------------------------------
-const resetConfirmOpen = ref(false)
-const resetFormOpen = ref(false)
-const resetSubmitting = ref(false)
-const resetTarget = ref<AdminUserResponse | null>(null)
-const resetForm = reactive({ password: '' })
-const resetErrors = reactive<Record<string, string>>({})
-
-function openResetPassword(user: AdminUserResponse) {
-  resetTarget.value = user
-  resetConfirmOpen.value = true
-}
-
-function onConfirmReset() {
-  resetConfirmOpen.value = false
-  resetForm.password = ''
-  clearErrors(resetErrors)
-  resetFormOpen.value = true
-}
-
-async function submitReset() {
-  clearErrors(resetErrors)
-  if (!resetForm.password) {
-    resetErrors.password = 'New password is required.'
-    return
-  }
-  if (resetForm.password.length < 8) {
-    resetErrors.password = 'Password must be at least 8 characters.'
-    return
-  }
-  const target = resetTarget.value
-  if (!target) return
-  resetSubmitting.value = true
-  try {
-    await users.resetPassword(target.userId, resetForm.password)
-    resetFormOpen.value = false
-    notifySuccess('Password reset')
-  }
-  catch (err) {
-    notifyError(errorMessage(err, 'Could not reset the password.'))
-  }
-  finally {
-    resetSubmitting.value = false
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Row action menu (only when the user can manage)
 // ---------------------------------------------------------------------------
 function rowMenuItems(user: AdminUserResponse) {
-  return [
-    [
-      {
-        label: 'Edit',
-        icon: 'i-lucide-pencil',
-        onSelect: () => openEdit(user),
-      },
-      {
-        label: user.isActive ? 'Disable' : 'Enable',
-        icon: user.isActive ? 'i-lucide-user-x' : 'i-lucide-user-check',
-        onSelect: () => onToggleStatus(user),
-      },
-      {
-        label: 'Reset Password',
-        icon: 'i-lucide-key-round',
-        onSelect: () => openResetPassword(user),
-      },
-    ],
+  const actions = [
+    {
+      label: 'Edit',
+      icon: 'i-lucide-pencil',
+      onSelect: () => openEdit(user),
+    },
   ]
+  // Hide the self-disable action: you can't disable your own account (the
+  // server refuses it too). Enabling/disabling others stays available.
+  if (!(isSelf(user) && user.isActive)) {
+    actions.push({
+      label: user.isActive ? 'Disable' : 'Enable',
+      icon: user.isActive ? 'i-lucide-user-x' : 'i-lucide-user-check',
+      onSelect: () => onToggleStatus(user),
+    })
+  }
+  return [actions]
 }
 
 // ---------------------------------------------------------------------------
@@ -355,7 +317,7 @@ function notifyError(description: string) {
     <!-- User Mapping section -->
     <div class="flex items-center justify-between gap-4">
       <h2 class="text-[17px] font-semibold text-ink">User Mapping</h2>
-      <UButton v-if="canManage" icon="i-lucide-plus" label="Add User" @click="openAdd" />
+      <UButton v-if="canManage && canCreateUser" icon="i-lucide-plus" label="Add User" @click="openAdd" />
     </div>
 
     <ErrorState
@@ -369,10 +331,10 @@ function notifyError(description: string) {
       <EmptyState
         v-if="!pending && rows.length === 0"
         title="No users yet"
-        description="Add a user to get started."
+        description="Users are provisioned via Active Directory sign-in."
         icon="i-lucide-users"
       >
-        <template v-if="canManage" #action>
+        <template v-if="canManage && canCreateUser" #action>
           <UButton icon="i-lucide-plus" label="Add User" @click="openAdd" />
         </template>
       </EmptyState>
@@ -593,33 +555,6 @@ function notifyError(description: string) {
       </template>
     </UModal>
 
-    <!-- Reset Password: new-password form (shown after confirmation) -->
-    <UModal v-model:open="resetFormOpen" title="Reset Password">
-      <template #body>
-        <form class="flex flex-col gap-4" @submit.prevent="submitReset">
-          <FormField label="New Password" name="reset-password" :error="resetErrors.password" required>
-            <template #default="{ id, describedBy, invalid }">
-              <UInput
-                :id="id"
-                v-model="resetForm.password"
-                type="password"
-                :aria-describedby="describedBy"
-                :aria-invalid="invalid"
-                class="w-full"
-              />
-            </template>
-          </FormField>
-        </form>
-      </template>
-
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" label="Cancel" :disabled="resetSubmitting" @click="resetFormOpen = false" />
-          <UButton label="Set Password" :loading="resetSubmitting" @click="submitReset" />
-        </div>
-      </template>
-    </UModal>
-
     <!-- Destructive confirmations -->
     <ConfirmDialog
       v-model="disableConfirmOpen"
@@ -629,15 +564,6 @@ function notifyError(description: string) {
       confirm-color="error"
       :loading="statusSubmitting"
       @confirm="confirmDisable"
-    />
-
-    <ConfirmDialog
-      v-model="resetConfirmOpen"
-      title="Reset password?"
-      :message="`You are about to reset the password for ${resetTarget?.displayName ?? 'this user'}. Continue to set a new password.`"
-      confirm-label="Continue"
-      confirm-color="warning"
-      @confirm="onConfirmReset"
     />
   </div>
 </template>

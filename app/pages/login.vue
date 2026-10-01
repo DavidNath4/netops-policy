@@ -27,6 +27,11 @@ function validate(): boolean {
 }
 
 async function onSubmit() {
+  // Synchronous double-fire guard: a double-clicked submit (or a duplicated
+  // fetch) would otherwise run the first factor twice and write two
+  // AUTH/LOGIN/SUCCESS rows. Bailing out before any await keeps it to one.
+  if (loading.value) return
+
   submitError.value = undefined
   if (!validate()) return
 

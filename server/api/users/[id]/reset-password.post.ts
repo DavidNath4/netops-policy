@@ -1,34 +1,21 @@
-import { defineEventHandler, getRouterParam, readBody } from 'h3'
+import { defineEventHandler } from 'h3'
 
 import { PERMISSIONS } from '#shared/constants/rbac'
-import { AdminResetPasswordSchema } from '#shared/schemas/user.schema'
-import { UserNotFoundError, resetUserPassword } from '../../../services/user.service'
 import { assertSameOrigin, requirePermission } from '../../../utils/auth'
-import { useDatabase } from '../../../utils/db'
-import { apiError, ok } from '../../../utils/envelope'
+import { apiError } from '../../../utils/envelope'
 
 /**
- * POST /api/users/:id/reset-password — set a new password. Requires
- * ADMINISTRATION_MANAGE.
+ * POST /api/users/:id/reset-password — DISABLED. Passwords are managed in
+ * Active Directory, so the app never resets them.
+ *
+ * The route is kept (with its origin + ADMINISTRATION_MANAGE checks) so the
+ * contract stays stable, but it rejects before changing anything. To re-enable,
+ * restore the AdminResetPasswordSchema validation and resetUserPassword(...)
+ * call (see git history).
  */
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
   await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
 
-  const id = getRouterParam(event, 'id')
-  if (!id) throw apiError(404, 'NOT_FOUND', 'User not found')
-
-  const parsed = AdminResetPasswordSchema.safeParse(await readBody(event))
-  if (!parsed.success) {
-    throw apiError(400, 'VALIDATION_ERROR', 'Invalid password')
-  }
-
-  try {
-    await resetUserPassword(useDatabase(), id, parsed.data)
-    return ok({ status: 'RESET' as const })
-  }
-  catch (err) {
-    if (err instanceof UserNotFoundError) throw apiError(404, 'NOT_FOUND', 'User not found')
-    throw err
-  }
+  throw apiError(403, 'FORBIDDEN', 'Password reset is disabled; passwords are managed in Active Directory')
 })

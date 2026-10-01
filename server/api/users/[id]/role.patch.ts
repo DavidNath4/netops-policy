@@ -13,7 +13,8 @@ import { apiError, ok } from '../../../utils/envelope'
  */
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
+  // requirePermission returns the acting admin's row — the audit actor.
+  const actor = await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
 
   const id = getRouterParam(event, 'id')
   if (!id) throw apiError(404, 'NOT_FOUND', 'User not found')
@@ -24,7 +25,7 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    const user = await changeUserRole(useDatabase(), id, parsed.data)
+    const user = await changeUserRole(useDatabase(), event, actor, id, parsed.data)
     return ok(user)
   }
   catch (err) {

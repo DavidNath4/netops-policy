@@ -40,17 +40,28 @@ This document defines the functional requirements (grouped by capability area), 
   remain. So the Admin-area criteria for create (2, 8) and reset (6) are currently off.
 - **Endpoints are singular**: `/api/acl/*` and `/api/route/*`.
 - **Log Trail delivered** at `/logs` (common access, no permission guard) as a
-  standard horizontal table with columns **Time, User, Module, Action, Status**.
-  Filters: search (matches username / display name / email), module, action,
-  status, and a From/To date range; server-side pagination; loading/empty/error
-  states. A row-click detail modal shows the full audit record (incl. technical
-  fields like Source IP and Correlation Id) and the four JSONB payloads; for
-  ACL/ROUTE rows it also fetches the `acl_logs`/`route_logs` detail by correlation
-  id and shows an "Execution Inspection" section. All copy is in English.
-- **Auth activity audited.** Every login (success/failed), and logout, is recorded
-  to `audit_logs` for all account origins (LOCAL/AD) and all roles (incl.
-  `role_id = null`); the `audit_action` enum gained `LOGOUT`. Failed-login records
-  store only `{ identifier, provider?, reason }`, never a password.
+  standard horizontal table with columns **Time, User, Source IP, Module, Action,
+  Status**. Filters: search (matches username / display name / email), module,
+  action (the action options depend on the selected module), status, and a
+  From/To date range; server-side pagination; loading/empty/error states; the
+  table body scrolls inside a fixed-height container with a sticky header and
+  always-visible pagination. A row-click detail modal shows the full audit record
+  (incl. technical fields like User Agent and Correlation Id) and the four JSONB
+  payloads; for ACL/ROUTE rows it also fetches the `acl_logs`/`route_logs` detail
+  by correlation id and shows an "Execution Inspection" section. All copy is in
+  English.
+- **Auth activity audited.** Every authentication event, for all account origins
+  (LOCAL/AD) and all roles (incl. `role_id = null`), is recorded to `audit_logs`.
+  First and second factor are distinct actions: a successful login writes TWO rows
+  — `LOGIN/SUCCESS` (first factor) then `MFA_VERIFY/SUCCESS` (second factor); an
+  MFA failure writes `MFA_VERIFY/FAILED` + `LOGIN/FAILED`; a first-factor failure
+  writes `LOGIN/FAILED` only; logout writes `LOGOUT/SUCCESS`. The `audit_action`
+  enum gained `LOGOUT` then `MFA_VERIFY`. Failed-login/MFA records store only
+  `{ identifier/provider?/reason }`, never a password or the submitted code.
+- **User admin audited.** A role change and an account activate/deactivate are
+  recorded as `USER/UPDATE` with the acting admin as the actor and the target
+  user + change detail in `request_payload` (discriminated by `kind`:
+  `ROLE_CHANGE` / `STATUS_CHANGE`); no password is included.
 - **Audit-detail tables.** `acl_logs`/`route_logs` complement `audit_logs` for
   ACL/ROUTE execution detail (see n8n Integration spec, Req 12); there are still
   no ACL/route configuration-state tables.

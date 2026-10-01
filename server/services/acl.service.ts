@@ -4,8 +4,9 @@ import type { Database } from '~~/database'
 import { callN8n } from '../network/n8n-client'
 import { buildAclPreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
+import { insertAclLog } from '../repositories/acl-log.repository'
 import type { AuditContext } from '../utils/audit-context'
-import { record } from './audit.service'
+import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import type { AclExecuteInput, AclShowInput } from '#shared/schemas/acl.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
@@ -66,22 +67,47 @@ export async function aclShow(
     },
   })
 
-  await record(db, {
-    ...ctx,
-    module: 'ACL',
-    action: 'SHOW',
-    status: result.status,
-    correlationId,
-    // Only the non-secret search value is audited; credentials never are.
-    requestPayload: { source: input.search },
-    executionPayload: result.execution ?? null,
-    responsePayload: {
-      total: result.total ?? null,
-      items: result.items ?? null,
-      message: result.message ?? null,
-      error: result.error ?? null,
+  // Master audit row + acl_logs detail row, written atomically.
+  await recordWithDetail(
+    db,
+    {
+      ...ctx,
+      module: 'ACL',
+      action: 'SHOW',
+      status: result.status,
+      correlationId,
+      // Only the non-secret search value is audited; the RAW n8n request body
+      // (which carries user/pass) is masked by record()'s deep redactPayload.
+      requestPayload: { source: input.search, n8nRequest: result.raw.request },
+      executionPayload: result.execution ?? null,
+      responsePayload: {
+        total: result.total ?? null,
+        items: result.items ?? null,
+        message: result.message ?? null,
+        error: result.error ?? null,
+        n8nResponse: result.raw.response,
+      },
     },
-  })
+    async (tx, auditId) => await insertAclLog(tx, {
+      auditId,
+      correlationId,
+      action: 'SHOW',
+      status: result.status,
+      device: result.device ?? null,
+      // ACL SHOW: the search value is the source; there is no destination.
+      source: input.search,
+      destination: null,
+      // SHOW has no command preview.
+      commandPreview: null,
+      // Defense-in-depth: metadata/summary passed through redactPayload.
+      executionMeta: redactPayload(result.execution ?? null),
+      responseSummary: redactPayload({
+        total: result.total ?? null,
+        message: result.message ?? null,
+        error: result.error ?? null,
+      }),
+    }),
+  )
 
   return toOperationResult(correlationId, result)
 }
@@ -115,25 +141,52 @@ export async function aclExecute(
     },
   })
 
-  await record(db, {
-    ...ctx,
-    module: 'ACL',
-    action: input.operation,
-    status: result.status,
-    correlationId,
-    // redactPayload masks user/pass/exec*; the command snapshot is already
-    // credential-free (preview never embeds creds).
-    requestPayload: redactPayload({ ...input }),
-    commandPayload: { command: preview.command },
-    executionPayload: result.execution ?? null,
-    responsePayload: {
-      total: result.total ?? null,
-      items: result.items ?? null,
-      message: result.message ?? null,
-      output: result.output ?? null,
-      error: result.error ?? null,
+  // Master audit row + acl_logs detail row, written atomically.
+  await recordWithDetail(
+    db,
+    {
+      ...ctx,
+      module: 'ACL',
+      action: input.operation,
+      status: result.status,
+      correlationId,
+      // redactPayload masks user/pass/exec*; the command snapshot is already
+      // credential-free (preview never embeds creds). The RAW n8n request body
+      // (user/pass) is masked by record()'s deep redactPayload.
+      requestPayload: redactPayload({ ...input, n8nRequest: result.raw.request }),
+      commandPayload: { command: preview.command },
+      executionPayload: result.execution ?? null,
+      responsePayload: {
+        total: result.total ?? null,
+        items: result.items ?? null,
+        message: result.message ?? null,
+        output: result.output ?? null,
+        error: result.error ?? null,
+        n8nResponse: result.raw.response,
+      },
     },
-  })
+    async (tx, auditId) => await insertAclLog(tx, {
+      auditId,
+      correlationId,
+      action: input.operation,
+      status: result.status,
+      device: result.device ?? null,
+      // ACL EXECUTE: the raw human-readable address inputs (NOT the joined
+      // "IP MASK" strings sent to n8n), which contain no credentials.
+      source: input.source,
+      destination: input.destination,
+      // preview.command lines are already credential-free; pass through
+      // redactPayload for defense-in-depth.
+      commandPreview: redactPayload(preview.command),
+      executionMeta: redactPayload(result.execution ?? null),
+      responseSummary: redactPayload({
+        total: result.total ?? null,
+        message: result.message ?? null,
+        output: result.output ?? null,
+        error: result.error ?? null,
+      }),
+    }),
+  )
 
   return toOperationResult(correlationId, result)
 }

@@ -140,11 +140,26 @@ export async function validateDeviceCredentials(
 }
 
 /**
- * Call the n8n webhook for one operation. Never throws for n8n/network errors —
- * it always resolves to an N8nResult (FAILED with a safe message on failure) so
- * the service can record an audit log and return a safe error to the client.
+ * The normalized N8nResult plus the RAW request/response bodies for audit.
+ *
+ * `raw.request` is the exact body sent to n8n (it contains the per-engineer
+ * `user`/`pass`) and `raw.response` is the raw parsed JSON n8n returned (or null
+ * on a timeout/unreachable/parse failure). These are surfaced ONLY so the
+ * ACL/ROUTE audit path can persist them — AFTER passing them through
+ * `redactPayload`, which masks the credentials. This type is intentionally LOCAL
+ * to the client so the shared `OperationResult` client contract stays unchanged.
+ * Every existing `N8nResult` field is preserved, so all current callers compile.
  */
-export async function callN8n(options: N8nCallOptions): Promise<N8nResult> {
+export type N8nCallResult = N8nResult & {
+  raw: { request: unknown, response: unknown }
+}
+
+/**
+ * Call the n8n webhook for one operation. Never throws for n8n/network errors —
+ * it always resolves to an N8nCallResult (FAILED with a safe message on failure)
+ * so the service can record an audit log and return a safe error to the client.
+ */
+export async function callN8n(options: N8nCallOptions): Promise<N8nCallResult> {
   const env = loadEnv()
   const url = resolveWebhookUrl(env.N8N_BASE_URL, options.module, options.action)
 
@@ -173,7 +188,8 @@ export async function callN8n(options: N8nCallOptions): Promise<N8nResult> {
       body = null
     }
 
-    return normalize(res.ok, body)
+    // Attach the raw request/response for the audit path (redacted before store).
+    return { ...normalize(res.ok, body), raw: { request: options.body, response: body } }
   }
   catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError'
@@ -181,6 +197,7 @@ export async function callN8n(options: N8nCallOptions): Promise<N8nResult> {
       status: 'FAILED',
       error: aborted ? 'n8n request timed out' : 'n8n is unreachable',
       message: null,
+      raw: { request: options.body, response: null },
     }
   }
   finally {

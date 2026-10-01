@@ -2,7 +2,7 @@ import { defineEventHandler, getRouterParam, readBody } from 'h3'
 
 import { PERMISSIONS } from '#shared/constants/rbac'
 import { AdminSetStatusSchema } from '#shared/schemas/user.schema'
-import { UserNotFoundError, setUserStatus } from '../../../services/user.service'
+import { SelfDisableError, UserNotFoundError, setUserStatus } from '../../../services/user.service'
 import { assertSameOrigin, requirePermission } from '../../../utils/auth'
 import { useDatabase } from '../../../utils/db'
 import { apiError, ok } from '../../../utils/envelope'
@@ -13,7 +13,8 @@ import { apiError, ok } from '../../../utils/envelope'
  */
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
-  await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
+  // requirePermission returns the acting admin's row — the audit actor.
+  const actor = await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
 
   const id = getRouterParam(event, 'id')
   if (!id) throw apiError(404, 'NOT_FOUND', 'User not found')
@@ -24,11 +25,12 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    const user = await setUserStatus(useDatabase(), id, parsed.data.isActive)
+    const user = await setUserStatus(useDatabase(), event, actor, id, parsed.data.isActive)
     return ok(user)
   }
   catch (err) {
     if (err instanceof UserNotFoundError) throw apiError(404, 'NOT_FOUND', 'User not found')
+    if (err instanceof SelfDisableError) throw apiError(400, 'SELF_DISABLE_FORBIDDEN', 'You cannot disable your own account')
     throw err
   }
 })

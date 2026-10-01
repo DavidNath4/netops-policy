@@ -1,4 +1,4 @@
-import type { Database } from '~~/database'
+import type { Database, DbOrTx } from '~~/database'
 import {
   type AuditListFilter,
   type AuditRow,
@@ -35,9 +35,13 @@ export interface RecordAuditInput {
   responsePayload?: unknown
 }
 
-/** Write one audit log. Payloads are redacted here, right before insert. */
-export async function record(db: Database, input: RecordAuditInput): Promise<void> {
-  await insertAudit(db, {
+/**
+ * Write one audit log and return the inserted row. Payloads are redacted here,
+ * right before insert. Void callers (AUTH/USER/N8N paths) simply ignore the
+ * returned row; the ACL/ROUTE detail writers use its `id` as the `auditId` FK.
+ */
+export async function record(db: DbOrTx, input: RecordAuditInput): Promise<AuditRow> {
+  return await insertAudit(db, {
     userId: input.userId ?? null,
     username: input.username ?? null,
     userRole: input.userRole ?? null,
@@ -52,6 +56,24 @@ export async function record(db: Database, input: RecordAuditInput): Promise<voi
     commandPayload: input.commandPayload === undefined ? null : redactPayload(input.commandPayload),
     executionPayload: input.executionPayload === undefined ? null : redactPayload(input.executionPayload),
     responsePayload: input.responsePayload === undefined ? null : redactPayload(input.responsePayload),
+  })
+}
+
+/**
+ * Write the master audit row and a module-specific detail row (acl_logs /
+ * route_logs) in ONE transaction, so the master and its complement detail never
+ * diverge. The audit payloads are redacted inside `record()`; the detail writer
+ * is responsible for redacting its own payloads (done at the ACL/ROUTE call site).
+ */
+export async function recordWithDetail<T>(
+  db: Database,
+  input: RecordAuditInput,
+  writeDetail: (tx: DbOrTx, auditId: string) => Promise<T>,
+): Promise<{ audit: AuditRow, detail: T }> {
+  return await db.transaction(async (tx) => {
+    const audit = await record(tx, input)
+    const detail = await writeDetail(tx, audit.id)
+    return { audit, detail }
   })
 }
 

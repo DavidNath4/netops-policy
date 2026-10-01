@@ -28,6 +28,14 @@ Progress note: much of the backend (Tasks 1–7 below) was already implemented i
 an earlier pass; the device-credentials feature (Task 5) and the show-schema
 adjustment are the new work, plus the frontend (Tasks 7–8).
 
+Audit note (Log Trail overhaul): the `audit_action` enum gained `MFA_VERIFY`
+(appended after `LOGOUT`). ACL/ROUTE audit now captures the ACTUAL n8n call: the
+raw request body is stored under `request_payload.n8nRequest` and the raw n8n
+response under `response_payload.n8nResponse` on the master row — both passed
+through `redactPayload` so the forwarded `user`/`pass` are masked to `***`. There
+is still no separate N8N module/row; n8n activity is folded into the ACL/ROUTE
+rows. The client-facing `OperationResult` shape is unchanged.
+
 ### Working rules
 
 - **Run one task at a time**, discussing between tasks.

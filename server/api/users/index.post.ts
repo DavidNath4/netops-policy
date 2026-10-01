@@ -1,36 +1,20 @@
-import { defineEventHandler, readBody } from 'h3'
+import { defineEventHandler } from 'h3'
 
 import { PERMISSIONS } from '#shared/constants/rbac'
-import { AdminCreateUserSchema } from '#shared/schemas/user.schema'
-import { EmailTakenError, RoleNotFoundError, createUser } from '../../services/user.service'
 import { assertSameOrigin, requirePermission } from '../../utils/auth'
-import { useDatabase } from '../../utils/db'
-import { apiError, ok } from '../../utils/envelope'
+import { apiError } from '../../utils/envelope'
 
 /**
- * POST /api/users — create a LOCAL user with a role. Requires
- * ADMINISTRATION_MANAGE.
+ * POST /api/users — DISABLED. User creation is turned off for now.
+ *
+ * The route is kept (with its origin + ADMINISTRATION_MANAGE checks) so the
+ * API contract and authorization stay stable, but it rejects before creating
+ * anything. To re-enable, restore the AdminCreateUserSchema validation and the
+ * createUser(...) call (see git history).
  */
 export default defineEventHandler(async (event) => {
   assertSameOrigin(event)
   await requirePermission(event, PERMISSIONS.ADMINISTRATION_MANAGE)
 
-  const parsed = AdminCreateUserSchema.safeParse(await readBody(event))
-  if (!parsed.success) {
-    throw apiError(400, 'VALIDATION_ERROR', 'Invalid user details')
-  }
-
-  try {
-    const user = await createUser(useDatabase(), parsed.data)
-    return ok(user)
-  }
-  catch (err) {
-    if (err instanceof EmailTakenError) {
-      throw apiError(409, 'CONFLICT', 'A user with this email already exists')
-    }
-    if (err instanceof RoleNotFoundError) {
-      throw apiError(400, 'VALIDATION_ERROR', 'Unknown role')
-    }
-    throw err
-  }
+  throw apiError(403, 'FORBIDDEN', 'User creation is currently disabled')
 })
