@@ -678,6 +678,18 @@ export const OperationResultSchema = z.object({
 });
 ```
 
+#### iTop ticket schemas (`shared/schemas/itop.schema.ts`) — n8n Integration spec Req 13
+
+Read-only iTop ticket search/preview contract (never a raw DB row). `changeTicket` becomes **required** in the ACL/Route field schemas and carries the selected iTop ticket `ref`.
+
+```typescript
+export const ItopTicketSearchSchema = z.object({ q: z.string().trim().min(1).max(64), limit: z.coerce.number().int().positive().max(50).default(20) });
+export const ItopTicketRefSchema = z.object({ ref: z.string().trim().min(1).max(64) });
+export const ItopTicketSummarySchema = z.object({ ref, title, type, operationalStatus, startDate, endDate });   // parent `ticket` columns only
+export const ItopTicketDetailSchema = ItopTicketSummarySchema.extend({ description, caller, organization, detail }); // + resolved caller/org + per-type block
+export const ConnectionTestResultSchema = z.object({ ok: z.boolean(), message: z.string() }); // shared by /api/itop/test + /api/n8n/test
+```
+
 #### User schemas (`shared/schemas/user.ts`) — Req 3
 
 ```typescript
@@ -778,6 +790,11 @@ export const EnvSchema = z.object({
   N8N_BASE_URL: z.string().url(),                              // base for the ACL/route webhooks
   N8N_API_KEY: z.string().min(1),                             // sent to n8n on every call; never returned to the client
   N8N_TIMEOUT_MS: z.coerce.number().int().positive().default(15000),
+  // iTop (read-only MariaDB) ticket lookup (see n8n-integration spec Req 13).
+  // Both OPTIONAL so the app boots without iTop; ticket endpoints return
+  // ITOP_UNREACHABLE and the admin Test button reports "not configured" when unset.
+  ITOP_DATABASE_URL: z.string().url().optional(),             // mysql://… ; never in runtimeConfig.public
+  ITOP_TIMEOUT_MS: z.coerce.number().int().positive().default(10000),
   // SEED_USER_* consumed by db:seed (dev LOCAL admin), not required at runtime.
 });
 ```
@@ -918,6 +935,10 @@ The Command_Preview is built and redacted **on the server** and returned for dis
 | GET | `/api/acl-logs/correlation/:id` | valid session | — | ACL detail rows for one correlation id |
 | GET | `/api/route-logs` | valid session | pagination | `Paginated<RouteLog>` — route audit-detail (Req 8.9a, n8n Req 12) |
 | GET | `/api/route-logs/correlation/:id` | valid session | — | route detail rows for one correlation id |
+| POST | `/api/itop/tickets/search` | valid session (no feature permission) | `ItopTicketSearchSchema` `{q, limit}` | `ItopTicketSummary[]` — iTop ticket search (n8n Req 13 R1–R4) |
+| POST | `/api/itop/tickets/preview` | valid session (no feature permission) | `ItopTicketRefSchema` `{ref}` | `ItopTicketDetail` — single ticket preview; `NOT_FOUND` if no match (n8n Req 13 R5–R8) |
+| POST | `/api/itop/test` | ADMINISTRATION_MANAGE | — | `{ ok, message }` — read-only `SELECT 1` probe (n8n Req 13 R13, R16) |
+| POST | `/api/n8n/test` | ADMINISTRATION_MANAGE | — | `{ ok, message }` — bounded n8n host probe, no API key on the wire (n8n Req 13 R14) |
 | GET | `/api/dashboard/summary` | valid session | — | summary object from `audit_logs` (Req 9) |
 
 Notes on the ACL/route endpoints:
@@ -934,7 +955,7 @@ The audit and (if any) list endpoints paginate server-side (Req 12.6, NFR Perf 1
 - **Layouts**: `auth.vue` (bare, for `/login`) and `default.vue` (app shell with `AppSidebar` + `AppHeader`). Sidebar links are permission-gated (Req 2.7).
 - **Pages**: `login`, `index` (dashboard), `acl/`, `routes/`, `administration/users/`, `logs/`.
   - **Log Trail (`logs/index.vue`, route `/logs`)** — common access, no permission guard (matches the sidebar). A standard horizontal HTML table with columns **Time, User, Module, Action, Status**, a full filter set (search by username/display name/email, module, action, status, From/To date range), server-side pagination, and loading/empty/error states. A row-click opens a detail modal showing the full audit record (incl. technical fields like Source IP and Correlation Id) and the four JSONB payloads; for ACL/ROUTE rows it fetches the `acl_logs`/`route_logs` detail by correlation id (`/api/acl-logs/correlation/:id`, `/api/route-logs/correlation/:id`) and renders an "Execution Inspection" section. All copy is in English (Req 8.8, 8.9, 2.10).
-- **Reusable components**: `PageHeader`, `DataTable`, `StatusBadge`, `FormField`, `ConfirmDialog` (destructive-action confirm — Req 13.3), `LoadingState`, `EmptyState`, `ErrorState` (every data page provides these — Req 13.1, 13.2), `Pagination`.
+- **Reusable components**: `PageHeader`, `DataTable`, `StatusBadge`, `FormField`, `ConfirmDialog` (destructive-action confirm — Req 13.3), `LoadingState`, `EmptyState`, `ErrorState` (every data page provides these — Req 13.1, 13.2), `Pagination`, `DeviceCredentialsModal`, `ItopTicketModal` (iTop change-ticket picker for the ACL/Route add+delete forms; renders every iTop-sourced string via escaped `{{ }}` only — n8n Integration spec Req 13 R6).
 - **Composables**:
   - `useAuth()` — current user, login/logout, calls `/api/auth/me`.
   - `usePermissions()` — `can(perm)` helper used to hide gated menus/buttons (Req 2.7).
@@ -964,7 +985,8 @@ export const fail = (code: ErrorCode, message: string, fields?: Record<string,st
 
 export type ErrorCode =
   | 'VALIDATION_ERROR' | 'UNAUTHENTICATED' | 'FORBIDDEN'
-  | 'NOT_FOUND' | 'CONFLICT' | 'DEVICE_CREDENTIALS_REQUIRED' | 'INTERNAL_ERROR';
+  | 'NOT_FOUND' | 'CONFLICT' | 'DEVICE_CREDENTIALS_REQUIRED'
+  | 'ITOP_UNREACHABLE' | 'INTERNAL_ERROR';   // ITOP_UNREACHABLE: iTop unset/unreachable/timeout (n8n Req 13 R4)
 ```
 
 `DEVICE_CREDENTIALS_REQUIRED` (400) is returned when a read operation (ACL/Route show/list/search) is attempted with no valid Device_Session_Credentials; the client prompts the engineer to enter them (n8n-integration Req 11).
@@ -1190,7 +1212,7 @@ Testing uses Vitest with a dual approach: **property-based tests** for universal
 
 ### Configuration (Req 14)
 
-- `.env.example` provides placeholders (no real credentials) for `NODE_ENV`, `DATABASE_URL`, `SESSION_SECRET`, `MFA_ENCRYPTION_KEY`, the AD variables, and the n8n variables `N8N_BASE_URL` / `N8N_API_KEY` / `N8N_TIMEOUT_MS` (Req 14.1).
+- `.env.example` provides placeholders (no real credentials) for `NODE_ENV`, `DATABASE_URL`, `SESSION_SECRET`, `MFA_ENCRYPTION_KEY`, the AD variables, the n8n variables `N8N_BASE_URL` / `N8N_API_KEY` / `N8N_TIMEOUT_MS`, and the optional iTop variables `ITOP_DATABASE_URL` / `ITOP_TIMEOUT_MS` (Req 14.1).
 - A Nitro startup plugin validates `process.env` against `EnvSchema`; missing/invalid values halt startup, including the n8n variables required for ACL/route execution (Req 14.2, 14.3).
 - The n8n API key stays server-side only (Req 14.4).
 - The app never provisions a PostgreSQL database (Req 14.5), never auto-migrates at startup (Req 14.6), and never falls back to SQLite or any embedded DB (Req 14.7).

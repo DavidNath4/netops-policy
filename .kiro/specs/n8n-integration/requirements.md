@@ -195,6 +195,32 @@ This requirement adds two **audit-detail** tables, `acl_logs` and `route_logs`, 
 8. THE application SHALL expose read-only, authenticated endpoints that require no feature permission (mirroring `/api/audit`): `GET /api/acl-logs`, `GET /api/acl-logs/correlation/:id`, `GET /api/route-logs`, and `GET /api/route-logs/correlation/:id`.
 9. THE application SHALL NOT expose any endpoint that deletes or mutates detail rows during normal operation.
 
+### Requirement 13: iTop ticket lookup and change-ticket selection
+
+**User Story:** As a network engineer, I want to search a read-only iTop ticket store and pick the exact change ticket before I generate/execute an ACL or route change, so that every change is tied to a real, auditable ticket.
+
+iTop is a foreign, read-only MariaDB queried directly from the server (SELECT only). The ticket picker gates ACL/Route add and delete: the engineer searches, previews the ticket, and selects it; the selected `ref` fills the already-audited `changeTicket` field. Two admin-only "Test Connection" diagnostics (iTop + n8n) round out the operability story.
+
+#### Acceptance Criteria
+
+1. R1 — WHEN an authenticated engineer submits a non-empty query on an ACL/Route add or delete page, THE system SHALL search the iTop `ticket` parent table by `ref` and `title` (case-insensitive, substring) across ALL ticket types and return at most `limit` (default 20, max 50) summaries, without filtering by status.
+2. R2 — THE search SHALL query only the parent `ticket` table (no joins, no heavy `ORDER BY`) using parameterized placeholders, bounded by a query timeout.
+3. R3 — IF the query is empty, longer than 64 chars, or missing, THEN THE system SHALL reject the request with `VALIDATION_ERROR` and SHALL NOT touch iTop.
+4. R4 — IF iTop is unconfigured, unreachable, or times out, THEN THE system SHALL return `ITOP_UNREACHABLE` with a safe message and SHALL NOT surface SQL, stack, connection string, or credentials.
+5. R5 — WHEN an engineer selects a ticket `ref`, THE system SHALL fetch that single ticket row by its indexed `ref`, join only the one type-specific detail table resolved from `finalclass`, resolve contact/organization names via separate PK `IN (...)` lookups, and return a detail object (summary + resolved caller name/email + organization name + a per-type detail block + description).
+6. R6 — THE preview SHALL pass all iTop-sourced strings as plain text; the UI SHALL render ALL of them escaped (`{{ }}`, never `v-html` or any raw-HTML sink) because iTop rich-text fields may contain HTML/script.
+7. R7 — IF no ticket matches the `ref`, THEN THE system SHALL return `NOT_FOUND`.
+8. R8 — THE preview response SHALL contain only mapped, whitelisted fields (never a raw DB row).
+9. R9 — THE `changeTicket` field SHALL be REQUIRED on ACL add/delete and Route add/delete (the shared `ChangeTicketSchema`, bounded 1..64, unchanged).
+10. R10 — WHEN an engineer selects a ticket, THE form SHALL set `changeTicket = ticket.ref` (e.g. `C-035919`).
+11. R11 — WHILE no ticket is selected, THE Generate and Execute buttons SHALL stay disabled on all four forms.
+12. R12 — THE existing `changeTicket` audit behavior SHALL remain unchanged (the selected `ref` flows into the already-audited field; Log Trail code is not touched).
+13. R13 — WHEN an administrator clicks "Test iTop Connection", THE system SHALL run a read-only `SELECT 1` against iTop bounded by the iTop timeout and return `{ ok, message }`.
+14. R14 — WHEN an administrator clicks "Test n8n Connection", THE system SHALL perform a lightweight, `N8N_TIMEOUT_MS`-bounded probe against n8n and return `{ ok, message }` without leaking the API key; an HTTP status `>= 500` SHALL be reported as `ok: false` (degraded), and only a sub-500 response SHALL count as reachable.
+15. R15 — THE two test endpoints SHALL require `assertSameOrigin` + `requirePermission(ADMINISTRATION_MANAGE)`; their buttons SHALL be visible only when `canManage` is true.
+16. R16 — IF iTop is not configured, THEN the iTop test SHALL return `{ ok: false, message }` (never throw, never block boot).
+17. R17 — THE app SHALL boot successfully when `ITOP_DATABASE_URL` is unset (optional env var); iTop features SHALL surface the missing config only at call time as `ITOP_UNREACHABLE` / a failed test result.
+
 ## Non-Functional Requirements
 
 ### Security

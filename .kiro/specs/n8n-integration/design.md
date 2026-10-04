@@ -118,7 +118,8 @@ The client never throws credential-bearing errors upward; the `error` string is 
 }
 ```
 The form fields are `source`, `sourceMask`, `destination`, `destinationMask`,
-and an optional `changeTicket` (audited, not sent to n8n). The service joins
+and a **required** `changeTicket` (audited, not sent to n8n) that now carries the
+selected iTop ticket `ref` (see "iTop ticket picker" below). The service joins
 IP + mask into the `source`/`destination` strings above.
 
 **ACL SHOW** — `POST <base>/acl/show`. Body is exactly:
@@ -136,8 +137,9 @@ Protocol / Source / Destination / Service), `total`, `message`.
   "destination": "10.100.100.100 255.255.255.255"
 }
 ```
-The form fields are `routeIp`, `routeMask`, and an optional `changeTicket`; the
-service joins them into the single `destination` string.
+The form fields are `routeIp`, `routeMask`, and a **required** `changeTicket`
+(now the selected iTop ticket `ref`); the service joins the IP + mask into the
+single `destination` string.
 
 **ROUTE SHOW** — `POST <base>/route/show`. **Show-all**: body is only
 `{ "user": "…", "pass": "…" }` (no search value in the contract). The webhook
@@ -374,6 +376,39 @@ Add/delete are unchanged: they take the credentials in the request body per oper
 ### Reveal boundary
 
 `reveal` is the ONLY path that returns the device password to a client, and only to the engineer who owns that session. It is not logged and never appears in audit (Req 11.6, 11.9). Everything else exposes at most a boolean + username.
+
+## iTop ticket picker (Req 13)
+
+A sibling read-only integration to Device Session Credentials: iTop is a foreign, read-only MariaDB (not part of the Drizzle schema) queried directly from the server via `mysql2`. It gates ACL/Route add + delete behind a selected change ticket and powers two admin "Test Connection" diagnostics.
+
+### Model and layering
+
+- `server/network/itop-client.ts` — a thin network client mirroring `n8n-client.ts`: lazily-created `mysql2` pool from `ITOP_DATABASE_URL`, every call bounded by `ITOP_TIMEOUT_MS` via a whole-operation `Promise.race` deadline and never-throwing (failures normalize to `ItopUnreachableError` or a safe `{ ok, message }`). SELECT-only, parameterized placeholders, no `multipleStatements` (Req 13 R2, R4, N1).
+- `server/services/itop.service.ts` — the pure `resolveClass(finalclass)` resolver (class-table inheritance → detail table + API type label) plus row→Zod mappers; never returns a raw row.
+- `shared/schemas/itop.schema.ts` — the Zod source of truth: `ItopTicketSearchSchema`, `ItopTicketRefSchema`, `ItopTicketSummarySchema`, `ItopTicketDetailSchema`, and `ConnectionTestResultSchema` (shared by both test endpoints).
+
+### Endpoints
+
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/api/itop/tickets/search` | valid session (no new RBAC) | Search the parent `ticket` table by `ref`/`title` across all types; `{ q, limit }`; → `ItopTicketSummary[]`. `ITOP_UNREACHABLE` on failure. |
+| POST | `/api/itop/tickets/preview` | valid session (no new RBAC) | Fetch one ticket by `ref` + its type detail + resolved caller/org; → `ItopTicketDetail`. `NOT_FOUND` if no match. |
+| POST | `/api/itop/test` | `ADMINISTRATION_MANAGE` | `pingItop()` — read-only `SELECT 1`; → `{ ok, message }`; never throws. |
+| POST | `/api/n8n/test` | `ADMINISTRATION_MANAGE` | `pingN8n()` — bounded GET of the n8n origin root (no API key on the wire); HTTP ≥ 500 is degraded (`ok: false`); → `{ ok, message }`. |
+
+Search/preview are auth-only (a sub-step of an add/delete the engineer is already permitted to do, and read-only); the test endpoints are admin-only operational diagnostics. All four are POST to honor the `assertSameOrigin` CSRF posture.
+
+### Required change ticket + button gating
+
+`changeTicket` is now **required** in `AclFields`/`RouteFields` (shared `ChangeTicketSchema`, bounded 1..64). On the four pages the free-text `changeTicket` input is replaced by a readonly display + a "Select ticket" button opening `ItopTicketModal`; selecting a ticket sets `form.changeTicket = ticket.ref`. The Generate button is disabled while `!form.changeTicket`, so no preview/execute can run without a selected ticket (Req 13 R9–R11). The audited `changeTicket` behavior is unchanged — the selected `ref` flows into the already-audited field; Log Trail code is untouched (R12).
+
+### XSS boundary
+
+iTop stores several fields as rich text and may contain HTML/script. `ItopTicketModal.vue` renders EVERY iTop-sourced string (title, description, caller/org names, and every detail-block field) via escaped `{{ }}` only — never `v-html` or any raw-HTML sink (Req 13 R6).
+
+### Config / boot resilience
+
+`ITOP_DATABASE_URL` is **optional** and `ITOP_TIMEOUT_MS` defaults to 10000; the app boots fine when iTop is unset. When unset, search/preview return `ITOP_UNREACHABLE` and the admin "Test iTop Connection" button reports "not configured" (Req 13 R16, R17).
 
 ## Correctness Properties
 

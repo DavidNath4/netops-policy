@@ -17,7 +17,7 @@ import type { AdminUserResponse, RoleOption } from '~/utils/api-types'
 
 definePageMeta({ middleware: 'permission', permission: 'ADMINISTRATION_SHOW' })
 
-const { users, roles: rolesApi } = useApi()
+const { users, roles: rolesApi, itop, n8n } = useApi()
 const { can } = usePermissions()
 const toast = useToast()
 
@@ -37,7 +37,7 @@ function isSelf(user: AdminUserResponse): boolean {
 // ---------------------------------------------------------------------------
 // List state + loading
 // ---------------------------------------------------------------------------
-const ITEMS_PER_PAGE = 20
+const ITEMS_PER_PAGE = 5
 
 const rows = ref<AdminUserResponse[]>([])
 const total = ref(0)
@@ -308,6 +308,42 @@ function notifySuccess(title: string) {
 function notifyError(description: string) {
   toast.add({ title: 'Error', description, color: 'error', icon: 'i-lucide-circle-alert' })
 }
+
+// ---------------------------------------------------------------------------
+// Test Connection (iTop + n8n) — admin-only diagnostics
+// ---------------------------------------------------------------------------
+const itopTesting = ref(false)
+const n8nTesting = ref(false)
+
+async function testItop() {
+  itopTesting.value = true
+  try {
+    const r = await itop.testConnection()
+    if (r.ok) notifySuccess(r.message)
+    else notifyError(r.message)
+  }
+  catch (e) {
+    notifyError(errorMessage(e, 'iTop test failed.'))
+  }
+  finally {
+    itopTesting.value = false
+  }
+}
+
+async function testN8n() {
+  n8nTesting.value = true
+  try {
+    const r = await n8n.testConnection()
+    if (r.ok) notifySuccess(r.message)
+    else notifyError(r.message)
+  }
+  catch (e) {
+    notifyError(errorMessage(e, 'n8n test failed.'))
+  }
+  finally {
+    n8nTesting.value = false
+  }
+}
 </script>
 
 <template>
@@ -416,6 +452,29 @@ function notifyError(description: string) {
         :items-per-page="ITEMS_PER_PAGE"
       />
     </template>
+
+    <!-- Connections — admin-only connectivity diagnostics -->
+    <div v-if="canManage" class="flex flex-col gap-3 rounded-lg border border-line bg-panel p-4">
+      <h2 class="text-[17px] font-semibold text-ink">Connections</h2>
+      <div class="flex flex-wrap items-center gap-3">
+        <UButton
+          color="neutral"
+          variant="outline"
+          icon="i-lucide-plug"
+          label="Test iTop Connection"
+          :loading="itopTesting"
+          @click="testItop"
+        />
+        <UButton
+          color="neutral"
+          variant="outline"
+          icon="i-lucide-plug"
+          label="Test n8n Connection"
+          :loading="n8nTesting"
+          @click="testN8n"
+        />
+      </div>
+    </div>
 
     <!-- Add User dialog -->
     <UModal v-model:open="addOpen" title="Add User">

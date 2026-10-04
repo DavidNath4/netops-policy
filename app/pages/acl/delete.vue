@@ -4,6 +4,7 @@
 // plus execution credentials (user/pass). Credentials show only as *** in the
 // preview; the field payload is sent to n8n on explicit confirmation.
 import type { AclPreviewInput } from '#shared/schemas/acl.schema'
+import type { ItopTicketSummary } from '#shared/schemas/itop.schema'
 import type { OperationResult } from '#shared/schemas/n8n.schema'
 import { isValidIpv4 } from '#shared/schemas/network.schema'
 
@@ -23,6 +24,15 @@ const form = reactive({
 
 const showPassword = ref(false)
 
+// Change ticket is picked from iTop (read-only); form.changeTicket holds the
+// selected ref (the audited/submitted value), selectedTicket the richer summary.
+const ticketModalOpen = ref(false)
+const selectedTicket = ref<ItopTicketSummary | null>(null)
+function onTicketSelected(t: ItopTicketSummary) {
+  selectedTicket.value = t
+  form.changeTicket = t.ref
+}
+
 // Build the field payload for preview/execute (DELETE).
 function buildPayload(): AclPreviewInput {
   return {
@@ -31,10 +41,10 @@ function buildPayload(): AclPreviewInput {
     sourceMask: form.sourceMask.trim() || undefined,
     destination: form.destination.trim(),
     destinationMask: form.destinationMask.trim() || undefined,
-    changeTicket: form.changeTicket.trim() || undefined,
+    changeTicket: form.changeTicket,
     execUsername: form.execUsername,
     execPassword: form.execPassword,
-  } as AclPreviewInput
+  }
 }
 
 const preview = ref<string | null>(null)
@@ -103,6 +113,7 @@ function resetFields() {
   form.changeTicket = ''
   form.execUsername = ''
   form.execPassword = ''
+  selectedTicket.value = null
 }
 
 async function onExecuteConfirmed() {
@@ -238,12 +249,33 @@ const inputClass
           </template>
         </FormField>
 
-        <FormField label="Ticket Change" name="changeTicket">
+        <FormField label="Ticket Change" name="changeTicket" required>
           <template #default="{ id }">
-            <input :id="id" v-model="form.changeTicket" type="text" placeholder="e.g. CHG-123456" :class="inputClass">
+            <div class="flex items-center gap-2">
+              <input
+                :id="id"
+                :value="form.changeTicket"
+                type="text"
+                readonly
+                placeholder="No ticket selected"
+                :class="inputClass"
+              >
+              <UButton
+                color="neutral"
+                variant="outline"
+                icon="i-lucide-search"
+                label="Select ticket"
+                @click="ticketModalOpen = true"
+              />
+            </div>
+            <p v-if="!form.changeTicket" class="mt-1 text-[11px] text-muted">
+              Select a change ticket to enable Generate.
+            </p>
           </template>
         </FormField>
       </div>
+
+      <ItopTicketModal v-model="ticketModalOpen" @selected="onTicketSelected" />
 
       <!-- Generated command preview + primary action -->
       <div class="flex flex-col gap-3">
@@ -265,7 +297,7 @@ const inputClass
           <button
             v-if="!preview"
             type="submit"
-            :disabled="generating || !ipsValid"
+            :disabled="generating || !ipsValid || !form.changeTicket"
             class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
           >
             <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />

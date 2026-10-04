@@ -18,6 +18,7 @@ import type { RouteExecuteInput, RoutePreviewInput } from '#shared/schemas/route
 import type { DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8n.schema'
 import type { AuditResponse } from '#shared/schemas/audit.schema'
 import type { AclLogResponse, RouteLogResponse } from '#shared/schemas/exec-log.schema'
+import type { ConnectionTestResult, ItopTicketDetail, ItopTicketSummary } from '#shared/schemas/itop.schema'
 
 /**
  * Dashboard widgets (server: dashboard.service.ts). Each widget has its own
@@ -225,6 +226,27 @@ export function useApi() {
     roles: {
       list(): Promise<{ roles: RoleOption[] }> {
         return apiGet<{ roles: RoleOption[] }>('/api/roles')
+      },
+    },
+
+    // iTop ticket lookup (read-only) for the ACL/Route change-ticket picker,
+    // plus the Administration "Test iTop Connection" diagnostic.
+    itop: {
+      searchTickets(q: string, limit = 20): Promise<ItopTicketSummary[]> {
+        return apiSend<ItopTicketSummary[]>('/api/itop/tickets/search', 'POST', { q, limit })
+      },
+      getTicket(ref: string): Promise<ItopTicketDetail> {
+        return apiSend<ItopTicketDetail>('/api/itop/tickets/preview', 'POST', { ref })
+      },
+      testConnection(): Promise<ConnectionTestResult> {
+        return apiSend<ConnectionTestResult>('/api/itop/test', 'POST')
+      },
+    },
+
+    // n8n connectivity diagnostic (Administration "Test n8n Connection").
+    n8n: {
+      testConnection(): Promise<ConnectionTestResult> {
+        return apiSend<ConnectionTestResult>('/api/n8n/test', 'POST')
       },
     },
   }
