@@ -25,7 +25,7 @@ export type RouteShowInput = z.infer<typeof RouteShowSchema>
 const RouteFields = z.object({
   routeIp: z.string().trim().min(1, 'Route IP is required').max(64),
   routeMask: MaskSchema.optional(),
-  changeTicket: ChangeTicketSchema.optional(),
+  changeTicket: ChangeTicketSchema,
 })
 
 /** ROUTE ADD field payload (with credentials). */

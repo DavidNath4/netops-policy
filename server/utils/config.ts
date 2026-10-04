@@ -66,6 +66,18 @@ export const EnvSchema = z.object({
     .int()
     .positive('N8N_TIMEOUT_MS must be a positive integer')
     .default(15000),
+
+  // -------------------------------------------------------------------------
+  // iTop (read-only MariaDB) ticket lookup. Optional — the app boots without it;
+  // ticket endpoints return ITOP_UNREACHABLE and the admin Test button reports
+  // "not configured" when unset. See .kiro/specs/n8n-integration.
+  // -------------------------------------------------------------------------
+  ITOP_DATABASE_URL: z.string().url('ITOP_DATABASE_URL must be a valid URL').optional(),
+  ITOP_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .positive('ITOP_TIMEOUT_MS must be a positive integer')
+    .default(10000),
 })
   .refine(
     env => !env.AD_ENABLED || (env.AD_URL && env.AD_BASE_DN && env.AD_BIND_DN && env.AD_BIND_PASSWORD),

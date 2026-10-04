@@ -35,7 +35,7 @@ const AclFields = z.object({
   sourceMask: MaskSchema.optional(),
   destination: z.string().trim().min(1, 'Destination is required').max(64),
   destinationMask: MaskSchema.optional(),
-  changeTicket: ChangeTicketSchema.optional(),
+  changeTicket: ChangeTicketSchema,
 })
 
 /** ACL ADD field payload (with credentials). */

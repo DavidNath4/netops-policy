@@ -1,4 +1,5 @@
 import { loadEnv } from '../utils/config'
+import type { ConnectionTestResult } from '#shared/schemas/itop.schema'
 import type { Module, N8nResult, Operation } from '#shared/schemas/n8n.schema'
 
 // The ONLY component that talks to n8n.
@@ -199,6 +200,40 @@ export async function callN8n(options: N8nCallOptions): Promise<N8nCallResult> {
       message: null,
       raw: { request: options.body, response: null },
     }
+  }
+  finally {
+    clearTimeout(timeout)
+  }
+}
+
+/**
+ * Lightweight connectivity probe for the Administration "Test n8n Connection"
+ * button. Never throws. GETs the n8n ORIGIN ROOT (scheme+host) rather than the
+ * webhook path so no workflow can be triggered, and attaches NO API key (a
+ * health probe needs no auth, and we never put the secret on the wire).
+ *
+ * An HTTP status >= 500 is a reverse-proxy/gateway error page while n8n itself
+ * is down, so it is reported as degraded ({ ok: false }), NOT as a passing test;
+ * only a sub-500 response (incl. 401/404 from the n8n app) counts as reachable.
+ */
+export async function pingN8n(): Promise<ConnectionTestResult> {
+  const env = loadEnv()
+  const base = new URL(env.N8N_BASE_URL)
+  const url = `${base.protocol}//${base.host}/`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, { method: 'GET', signal: controller.signal })
+    if (res.status >= 500) {
+      return { ok: false, message: `n8n host responded HTTP ${res.status} — service may be down` }
+    }
+    return { ok: true, message: `n8n reachable (HTTP ${res.status})` }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return { ok: false, message: aborted ? 'n8n request timed out' : 'n8n is unreachable' }
   }
   finally {
     clearTimeout(timeout)
