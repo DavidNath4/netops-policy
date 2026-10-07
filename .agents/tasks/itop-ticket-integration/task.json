@@ -1,0 +1,7 @@
+{
+  "task_id": "task-itop-ticket-integration",
+  "task_description": "Add a read-only iTop (MariaDB) ticket search/preview flow that gates ACL/Route add+delete behind a selected ticket, plus two Administration Test Connection buttons (iTop + n8n), per the APPROVED design at .agents/tasks/itop-ticket-integration/design.md. Make changeTicket required. User-Mapping pagination (5) is already applied and only needs verification.",
+  "status": "completed",
+  "feature_order": ["FEAT-001", "FEAT-002"],
+  "blocked_reason": null
+}

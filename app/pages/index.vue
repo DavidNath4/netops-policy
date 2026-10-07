@@ -26,7 +26,7 @@
     <!-- Level 3 — drivers: three widgets on one row. Config Changes by
          Operation gets more room (col-span-2); Top Users and Recent Config
          Changes are compact (one column each). -->
-    <div class="grid grid-cols-1 items-start gap-6 lg:grid-cols-4">
+    <div class="grid grid-cols-1 gap-6 lg:grid-cols-4">
       <DashboardConfigByOperation class="lg:col-span-2" />
       <DashboardTopActiveUsers />
       <DashboardRecentConfigChanges />

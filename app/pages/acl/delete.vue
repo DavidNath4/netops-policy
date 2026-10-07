@@ -263,7 +263,6 @@ const inputClass
               <UButton
                 color="neutral"
                 variant="outline"
-                icon="i-lucide-search"
                 label="Select ticket"
                 @click="ticketModalOpen = true"
               />

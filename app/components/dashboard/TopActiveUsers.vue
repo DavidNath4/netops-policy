@@ -63,7 +63,7 @@ onMounted(() => loadUsers())
           <span class="shrink-0 text-[11px] tabular-nums text-muted">#{{ index + 1 }}</span>
           <span class="truncate text-[13px] font-medium text-ink">{{ user.username }}</span>
         </div>
-        <span class="shrink-0 text-[13px] tabular-nums text-muted">{{ user.count }}</span>
+        <span class="shrink-0 text-[13px] tabular-nums text-muted">{{ user.count }}  Activities</span>
       </li>
     </ul>
   </div>

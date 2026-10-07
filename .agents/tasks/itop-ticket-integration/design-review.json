@@ -1,0 +1,27 @@
+{
+  "verdict": "APPROVED",
+  "findings": [
+    {
+      "severity": "NIT",
+      "title": "§7 misstates where PERMISSIONS is imported from",
+      "where": "design.md §7 (test handler imports)",
+      "problem": "§7 says PERMISSIONS is imported 'from wherever requirePermission/PERMISSIONS are exported in server/utils/auth', but server/utils/auth.ts does not export PERMISSIONS. Verified in server/api/acl/show.post.ts and execute.post.ts: PERMISSIONS comes from the alias #shared/constants/rbac while requirePermission/assertSameOrigin come from ../../utils/auth.",
+      "fix": "State the imports explicitly for the test handlers: `import { PERMISSIONS } from '#shared/constants/rbac'` plus `import { assertSameOrigin, requirePermission } from '../../utils/auth'` and the matching envelope/network imports."
+    },
+    {
+      "severity": "NIT",
+      "title": "ItopTicketModal v-model vs underlying UModal open-model left implicit",
+      "where": "design.md §10.2 / §10.3",
+      "problem": "ItopTicketModal exposes modelValue/update:modelValue and is wired as <ItopTicketModal v-model=...>, but the repo's only UModal usage (DeviceCredentialsModal.vue) drives Nuxt UI's modal with v-model:open, not a bare v-model. The design does not say how modelValue is forwarded to the inner UModal (the exact wiring that is error-prone).",
+      "fix": "Add a line to §10.2: inside ItopTicketModal bind the inner modal with `<UModal :open=\"modelValue\" @update:open=\"emit('update:modelValue', $event)\">`, matching DeviceCredentialsModal.vue, because UModal uses the `open` model, not `modelValue`."
+    },
+    {
+      "severity": "NIT",
+      "title": "pingItop runs SELECT 1 through array-expansion run() without noting intent",
+      "where": "design.md §5 (pingItop)",
+      "problem": "pingItop calls run('SELECT 1', []); harmless with mysql2 .query(), but the design does not warn against an implementer switching pingItop to conn.ping()/.execute(), which would bypass the Promise.race timeout bound and reintroduce the array-expansion concerns §5/round-two were built to avoid.",
+      "fix": "Note in §5 that SELECT 1 has no placeholder, pass [] and keep it going through run() so it inherits the Promise.race timeout; do not substitute conn.ping() or .execute()."
+    }
+  ],
+  "reviewDoc": "e:\\Work\\CLOUD PROJECTS\\Netops-policy\\.agents\\tasks\\itop-ticket-integration\\design-review.md"
+}
