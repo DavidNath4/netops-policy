@@ -31,6 +31,9 @@ coverage
 # Kiro local machine settings (machine-specific paths; not shared)
 .kiro/settings/
 
+# Kiro agent task artifacts (plans, reviews, investigations — local workflow output)
+.agents/
+
 # Editors / IDEs
 .DS_Store
 .fleet
