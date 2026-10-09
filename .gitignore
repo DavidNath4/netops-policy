@@ -34,6 +34,10 @@ coverage
 # Kiro agent task artifacts (plans, reviews, investigations — local workflow output)
 .agents/
 
+# Local Docker build tooling (personal build/push workflow; not shared)
+build-and-push.bat
+app.version.txt
+
 # Editors / IDEs
 .DS_Store
 .fleet
