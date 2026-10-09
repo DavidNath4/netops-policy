@@ -39,7 +39,11 @@ catch {
 }
 
 const SeedEnvSchema = z.object({
-  DATABASE_URL: z.string().url('DATABASE_URL must be a valid URL'),
+  DB_HOST: z.string().min(1, 'DB_HOST is required'),
+  DB_PORT: z.coerce.number().int().positive().default(5432),
+  DB_NAME: z.string().min(1, 'DB_NAME is required'),
+  DB_USER: z.string().min(1, 'DB_USER is required'),
+  DB_PASSWORD: z.string().min(1, 'DB_PASSWORD is required'),
   SEED_USER_EMAIL: z
     .string()
     .trim()
@@ -60,7 +64,8 @@ const SeedEnvSchema = z.object({
 async function main(): Promise<void> {
   const env = SeedEnvSchema.parse(process.env)
 
-  const { db, client } = createDatabase(env.DATABASE_URL)
+  const databaseUrl = `postgres://${encodeURIComponent(env.DB_USER)}:${encodeURIComponent(env.DB_PASSWORD)}@${env.DB_HOST}:${env.DB_PORT}/${env.DB_NAME}`
+  const { db, client } = createDatabase(databaseUrl)
 
   try {
     await seedRbac(db)

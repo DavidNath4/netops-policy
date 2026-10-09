@@ -41,7 +41,9 @@ validates these and fails fast if any is invalid.
 
 Required:
 
-- `DATABASE_URL` — PostgreSQL connection string.
+- `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` — PostgreSQL
+  connection parts. The app assembles the URL and percent-encodes the password
+  automatically, so use the raw password (no URL-encoding, no quotes).
 - `SESSION_SECRET` — random string, min 32 chars.
 - `MFA_ENCRYPTION_KEY` — exactly 64 hex chars (32 bytes). Generate:
   `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
@@ -56,6 +58,14 @@ Active Directory (optional — only if testing AD login):
 - `AD_BIND_PASSWORD` — fill manually; never commit. Required when `AD_ENABLED=true`.
 
 Leave `AD_ENABLED=false` to run with LOCAL login only.
+
+iTop ticket lookup (optional, read-only MariaDB — all-or-nothing):
+
+- `ITOP_HOST` / `ITOP_PORT` / `ITOP_NAME` / `ITOP_USER` / `ITOP_PASSWORD` — set
+  all to enable the ACL/Route ticket picker, or leave all unset. The URL is
+  assembled and the password percent-encoded automatically (raw password, no
+  quotes). When unset, ticket endpoints and the admin "Test iTop Connection"
+  button report iTop as unavailable; the app still boots.
 
 ## Database migrations
 
