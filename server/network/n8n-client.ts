@@ -227,12 +227,27 @@ export async function pingN8n(): Promise<ConnectionTestResult> {
   try {
     const res = await fetch(url, { method: 'GET', signal: controller.signal })
     if (res.status >= 500) {
+      console.warn(`[n8n] test connection: host responded HTTP ${res.status} (target ${base.host}) — service may be down`)
       return { ok: false, message: `n8n host responded HTTP ${res.status} — service may be down` }
     }
+    console.log(`[n8n] test connection: OK (HTTP ${res.status}, target ${base.host})`)
     return { ok: true, message: `n8n reachable (HTTP ${res.status})` }
   }
   catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError'
+    // Log the real detail server-side (visible in container logs / Portainer),
+    // WITHOUT the API key (we never attach it on this probe anyway).
+    const e = err as { name?: string, code?: string, cause?: { code?: string }, message?: string }
+    console.error(
+      `[n8n] test connection failed:`,
+      JSON.stringify({
+        target: base.host,
+        aborted,
+        name: e?.name,
+        code: e?.code ?? e?.cause?.code,
+        message: e?.message,
+      }),
+    )
     return { ok: false, message: aborted ? 'n8n request timed out' : 'n8n is unreachable' }
   }
   finally {

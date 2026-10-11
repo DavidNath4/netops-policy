@@ -75,10 +75,32 @@ async function run<T extends mysql.RowDataPacket[]>(sql: string, params: unknown
   try {
     return await Promise.race([work, deadline])
   }
-  catch {
-    // Never leak SQL / connection string / driver detail upward.
+  catch (err) {
+    // Log the real driver detail server-side (visible in container logs /
+    // Portainer) for diagnostics, WITHOUT the connection string or password.
+    logItopError('query', err)
+    // Never leak SQL / connection string / driver detail upward to the client.
     throw new ItopUnreachableError('iTop query failed')
   }
+}
+
+/**
+ * Log an iTop failure to the server console for diagnostics. Prints only the
+ * driver's safe fields (name/code/errno/sqlState/message) — never the
+ * connection string, password, or full SQL. Visible in `docker logs` / Portainer.
+ */
+function logItopError(context: string, err: unknown): void {
+  const e = err as { name?: string, code?: string, errno?: number, sqlState?: string, message?: string }
+  console.error(
+    `[itop] ${context} failed:`,
+    JSON.stringify({
+      name: e?.name,
+      code: e?.code,
+      errno: e?.errno,
+      sqlState: e?.sqlState,
+      message: e?.message,
+    }),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -240,12 +262,16 @@ export async function resolveOrganizations(ids: number[]): Promise<OrgRow[]> {
 export async function pingItop(): Promise<{ ok: boolean, message: string }> {
   try {
     if (!getPool()) {
+      console.warn('[itop] test connection: ITOP_* env not configured (pool not created)')
       return { ok: false, message: 'iTop is not configured' }
     }
     await run('SELECT 1', [])
+    console.log('[itop] test connection: OK (SELECT 1 succeeded)')
     return { ok: true, message: 'iTop connection OK' }
   }
-  catch {
+  catch (err) {
+    // run() already logged the driver detail; add a line marking the probe path.
+    logItopError('test connection', err)
     return { ok: false, message: 'iTop is unreachable' }
   }
 }
