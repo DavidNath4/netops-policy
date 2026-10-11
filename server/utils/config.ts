@@ -42,6 +42,15 @@ export const EnvSchema = z.object({
   DB_PASSWORD: z.string().min(1, 'DB_PASSWORD is required'),
 
   SESSION_SECRET: z.string().min(32, 'SESSION_SECRET must be at least 32 characters'),
+  // Controls the `Secure` flag on auth cookies (session + MFA challenge).
+  // When unset it defaults to true in production (cookies require HTTPS) and
+  // false otherwise. Set COOKIE_SECURE=false to allow cookies over plain HTTP
+  // for a temporary UAT on an HTTP-only host — INSECURE (session token travels
+  // in plaintext); only use it as a bridge until HTTPS is in front of the app.
+  COOKIE_SECURE: z
+    .enum(['true', 'false'])
+    .optional()
+    .transform(v => (v === undefined ? undefined : v === 'true')),
   // AES-256-GCM key for encrypting TOTP secrets at rest.
   // 32 bytes encoded as 64 hex characters. Never stored in the database,
   // never sent to the client.

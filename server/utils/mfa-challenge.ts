@@ -29,8 +29,13 @@ interface ChallengePayload {
   expiresAt: number // epoch ms
 }
 
-function isProduction(): boolean {
-  return loadEnv().NODE_ENV === 'production'
+/**
+ * Whether the challenge cookie gets the `Secure` flag (HTTPS-only). Honors
+ * COOKIE_SECURE when set; otherwise defaults to true in production.
+ */
+function cookieSecure(): boolean {
+  const env = loadEnv()
+  return env.COOKIE_SECURE ?? env.NODE_ENV === 'production'
 }
 
 function sign(data: string): string {
@@ -65,7 +70,7 @@ export function issueMfaChallenge(event: H3Event, userId: string, purpose: MfaPu
   setCookie(event, MFA_CHALLENGE_COOKIE, token, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: isProduction(),
+    secure: cookieSecure(),
     path: '/',
     maxAge: Math.floor(ttlMs / 1000),
   })
@@ -126,7 +131,7 @@ export function clearMfaChallenge(event: H3Event): void {
   deleteCookie(event, MFA_CHALLENGE_COOKIE, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: isProduction(),
+    secure: cookieSecure(),
     path: '/',
   })
 }

@@ -39,9 +39,13 @@ function sessionTtlMs(): number {
   return loadEnv().SESSION_TTL_HOURS * 60 * 60 * 1000
 }
 
-/** True in production, where the cookie must be Secure (HTTPS-only). */
-function isProduction(): boolean {
-  return loadEnv().NODE_ENV === 'production'
+/**
+ * Whether auth cookies get the `Secure` flag (HTTPS-only). Honors COOKIE_SECURE
+ * when set; otherwise defaults to true in production, false elsewhere.
+ */
+function cookieSecure(): boolean {
+  const env = loadEnv()
+  return env.COOKIE_SECURE ?? env.NODE_ENV === 'production'
 }
 
 /**
@@ -67,7 +71,7 @@ export async function createSession(
   setCookie(event, SESSION_COOKIE, rawToken, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: isProduction(),
+    secure: cookieSecure(),
     path: '/',
     maxAge: Math.floor(sessionTtlMs() / 1000),
   })
@@ -137,7 +141,7 @@ export function clearSessionCookie(event: H3Event): void {
   deleteCookie(event, SESSION_COOKIE, {
     httpOnly: true,
     sameSite: 'lax',
-    secure: isProduction(),
+    secure: cookieSecure(),
     path: '/',
   })
 }

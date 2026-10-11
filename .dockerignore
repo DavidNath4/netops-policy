@@ -54,3 +54,6 @@ build-and-push.bat
 # Docs (optional at runtime)
 README.md
 AGENTS.md
+
+# Manual production SQL (run by hand in DBeaver — not part of the app build)
+database/prod-*.sql
