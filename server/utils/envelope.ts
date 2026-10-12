@@ -23,6 +23,7 @@ export type ErrorCode =
   | 'VALIDATION_ERROR'
   | 'FORBIDDEN_ORIGIN'
   | 'NOT_FOUND'
+  | 'TICKET_NOT_FOUND'
   | 'CONFLICT'
   | 'AD_UNREACHABLE'
   | 'ITOP_UNREACHABLE'

@@ -102,6 +102,8 @@ n8n response ──▶ Operation Result (Zod) ──▶ client
 
 Server-controlled fields (`id`, `correlation_id`, `created_at`, and the audit `status`) are never present on API Request schemas, so a client cannot set them (Req 11.4); the server sets them. The Command_Preview string is produced by the server and returned for display only — it is not part of the request the client can spoof, and it is not sent to n8n.
 
+For ACL/route **execute** (add/delete), the service first verifies the supplied `changeTicket` actually exists in iTop (`getTicketByRef`) before building the preview, calling n8n, or writing any audit row — a server-side chokepoint that cannot be bypassed by a direct API call sending a well-formed but fake ref. Absent ticket → `TICKET_NOT_FOUND` (404); iTop unverifiable → `ITOP_UNREACHABLE` (503); either way nothing executes and no audit row is written (block-total). See the n8n-integration spec (`.kiro/specs/n8n-integration/` Req 14) for detail.
+
 ## Project Structure
 
 Nuxt 4 convention: application (client + universal) code lives under `app/` (using `srcDir: 'app'`), and server code lives under `server/`. Nuxt auto-imports `server/api/**` as routes based on file name (e.g. `server/api/acl/show.post.ts` → `POST /api/acl/show`). `shared/` holds code safe for both client and server (Zod schemas, contracts, constants). `database/` holds Drizzle schema, migrations, and seeds and is used by the server and by CLI scripts.

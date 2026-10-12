@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
 import type { Database } from '~~/database'
+import { getTicketByRef, ItopUnreachableError } from '../network/itop-client'
 import { callN8n } from '../network/n8n-client'
 import { buildRoutePreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
 import { insertRouteLog } from '../repositories/route-log.repository'
 import type { AuditContext } from '../utils/audit-context'
+import { apiError } from '../utils/envelope'
 import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import type { RouteExecuteInput } from '#shared/schemas/route.schema'
@@ -119,6 +121,26 @@ export async function routeExecute(
   ctx: AuditContext,
   input: RouteExecuteInput,
 ): Promise<OperationResult> {
+  // Security guard: the UI forbids manual ticket entry (search + select only),
+  // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
+  // the change ticket actually exists in iTop before executing. Block-total: if
+  // iTop cannot verify (unreachable/unconfigured), reject rather than execute.
+  const ticketRef = input.changeTicket
+  try {
+    const ticket = await getTicketByRef(ticketRef)
+    if (ticket === null) {
+      console.warn(`[route] execute rejected: change ticket ${ticketRef} not found in iTop`)
+      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
+    }
+  }
+  catch (err) {
+    if (err instanceof ItopUnreachableError) {
+      console.warn(`[route] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
+      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
+    }
+    throw err
+  }
+
   const correlationId = randomUUID()
   const preview = buildRoutePreview(input)
 

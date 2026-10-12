@@ -402,6 +402,24 @@ Search/preview are auth-only (a sub-step of an add/delete the engineer is alread
 
 `changeTicket` is now **required** in `AclFields`/`RouteFields` (shared `ChangeTicketSchema`, bounded 1..64). On the four pages the free-text `changeTicket` input is replaced by a readonly display + a "Select ticket" button opening `ItopTicketModal`; selecting a ticket sets `form.changeTicket = ticket.ref`. The Generate button is disabled while `!form.changeTicket`, so no preview/execute can run without a selected ticket (Req 13 R9–R11). The audited `changeTicket` behavior is unchanged — the selected `ref` flows into the already-audited field; Log Trail code is untouched (R12).
 
+### Server-side ticket-existence guard on execute (Req 14)
+
+The UI gating above is client-side only; a direct API call (curl/Postman) to `/api/acl/execute` or `/api/route/execute` could still send a well-formed but FAKE `changeTicket` (format validation via `ChangeTicketSchema` does not prove existence). To close that bypass, `aclExecute` and `routeExecute` perform a server-side existence check as the **first step** — before building the preview, calling n8n, or writing any audit row:
+
+```
+const ticketRef = input.changeTicket
+try {
+  const ticket = await getTicketByRef(ticketRef)
+  if (ticket === null) throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
+}
+catch (err) {
+  if (err instanceof ItopUnreachableError) throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
+  throw err  // re-throw the TICKET_NOT_FOUND apiError (and anything else)
+}
+```
+
+Two rejection outcomes: ticket absent → `TICKET_NOT_FOUND` (404); iTop unconfigured/unreachable/timeout → `ITOP_UNREACHABLE` (503). This is a **block-total** posture — no verification means no execution. On either rejection the service returns before `callN8n` and before `recordWithDetail`, so **no audit row is written** (nothing executed) and no FAILED row is added for the rejection. The guard lives in the service layer so it is the single chokepoint and cannot be bypassed by an alternate/thin handler. It applies to EXECUTE only (ACL/ROUTE add + delete); `aclShow`/`routeShow` (no ticket) and `aclPreview`/`routePreview` (display-only, side-effect free) are unchanged. The only logging on rejection is a non-secret `console.warn` naming the ticket `ref` — no SQL, stack, connection string, or credential is leaked.
+
 ### XSS boundary
 
 iTop stores several fields as rich text and may contain HTML/script. `ItopTicketModal.vue` renders EVERY iTop-sourced string (title, description, caller/org names, and every detail-block field) via escaped `{{ }}` only — never `v-html` or any raw-HTML sink (Req 13 R6).

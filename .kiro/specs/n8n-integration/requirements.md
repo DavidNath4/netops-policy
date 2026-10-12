@@ -221,6 +221,21 @@ iTop is a foreign, read-only MariaDB queried directly from the server (SELECT on
 16. R16 — IF iTop is not configured, THEN the iTop test SHALL return `{ ok: false, message }` (never throw, never block boot).
 17. R17 — THE app SHALL boot successfully when `ITOP_DATABASE_URL` is unset (optional env var); iTop features SHALL surface the missing config only at call time as `ITOP_UNREACHABLE` / a failed test result.
 
+### Requirement 14: Server-side iTop ticket-existence check on ACL/Route execute
+
+**User Story:** As a security administrator, I want the server to confirm the supplied change ticket actually exists in iTop before any ACL/Route add or delete runs, so that a direct API call cannot execute a change against a fake but well-formed ticket ref.
+
+This is defense-in-depth behind the UI's search-and-select constraint (Requirement 13 R9–R11). The UI forbids manual ticket entry — an engineer must search iTop and select a real ticket — but a direct API call (curl/Postman) to the execute endpoints could still send a well-formed yet non-existent `ref` (e.g. `C-999999`). The format validation of `ChangeTicketSchema` alone does not prove the ticket exists. The service layer therefore re-verifies existence before delegating to n8n. The check applies to EXECUTE only (ADD and DELETE, both ACL and ROUTE); SHOW has no ticket and preview is display-only and side-effect free, so neither is touched.
+
+#### Acceptance Criteria
+
+1. WHEN an engineer executes an ACL or ROUTE add/delete, THE system SHALL, as the FIRST step before building the preview, calling n8n, or writing any audit row, verify that the supplied `changeTicket` exists in iTop by looking it up by `ref` (via `getTicketByRef`).
+2. IF the ticket is not found in iTop, THEN THE system SHALL reject the operation with `TICKET_NOT_FOUND` (HTTP 404) and SHALL NOT call n8n and SHALL NOT write any audit row.
+3. IF iTop is unconfigured, unreachable, or times out so the ticket cannot be verified, THEN THE system SHALL reject the operation with `ITOP_UNREACHABLE` (HTTP 503) and SHALL NOT call n8n and SHALL NOT write any audit row (block-total posture: a valid, verifiable ticket is mandatory for execution — no verification means no execution).
+4. THE check SHALL live in the service layer (`aclExecute` / `routeExecute`) as the single chokepoint, so it cannot be bypassed by a thin or alternate handler.
+5. THE rejection SHALL NOT leak SQL, stack, connection string, or any credential; a non-secret `console.warn` naming only the ticket `ref` is permitted.
+6. THE check SHALL apply to EXECUTE only; `aclShow`, `routeShow`, `aclPreview`, and `routePreview` SHALL be unchanged, and `changeTicket` SHALL remain REQUIRED on ACL/Route add and delete (Requirement 13 R9).
+
 ## Non-Functional Requirements
 
 ### Security

@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
 import type { Database } from '~~/database'
+import { getTicketByRef, ItopUnreachableError } from '../network/itop-client'
 import { callN8n } from '../network/n8n-client'
 import { buildAclPreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
 import { insertAclLog } from '../repositories/acl-log.repository'
 import type { AuditContext } from '../utils/audit-context'
+import { apiError } from '../utils/envelope'
 import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import type { AclExecuteInput, AclShowInput } from '#shared/schemas/acl.schema'
@@ -123,6 +125,26 @@ export async function aclExecute(
   ctx: AuditContext,
   input: AclExecuteInput,
 ): Promise<OperationResult> {
+  // Security guard: the UI forbids manual ticket entry (search + select only),
+  // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
+  // the change ticket actually exists in iTop before executing. Block-total: if
+  // iTop cannot verify (unreachable/unconfigured), reject rather than execute.
+  const ticketRef = input.changeTicket
+  try {
+    const ticket = await getTicketByRef(ticketRef)
+    if (ticket === null) {
+      console.warn(`[acl] execute rejected: change ticket ${ticketRef} not found in iTop`)
+      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
+    }
+  }
+  catch (err) {
+    if (err instanceof ItopUnreachableError) {
+      console.warn(`[acl] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
+      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
+    }
+    throw err
+  }
+
   const correlationId = randomUUID()
   const preview = buildAclPreview(input)
 
