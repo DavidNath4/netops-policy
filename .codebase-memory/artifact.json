@@ -1,0 +1,11 @@
+{
+    "schema_version": 2,
+    "commit": "3253484af3651723cdf535c73cf7d5b902de716f",
+    "indexed_at": "2026-10-19T01:13:14Z",
+    "project": "E-Work-CLOUD-PROJECTS-Netops-policy",
+    "nodes": 2960,
+    "edges": 5331,
+    "original_size": 9306112,
+    "compressed_size": 1186028,
+    "compression_level": 9
+}

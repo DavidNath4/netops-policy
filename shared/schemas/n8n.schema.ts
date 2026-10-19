@@ -84,7 +84,7 @@ export type N8nResult = z.infer<typeof N8nResultSchema>
  * structured result (e.g. ACL show rows) for table rendering; `output` is the
  * raw text fallback; `message` is n8n's human message.
  */
-export const OperationResultSchema = z.object({
+const OperationResultBase = z.object({
   correlationId: CorrelationIdSchema,
   status: OutcomeSchema,
   message: z.string().nullable(),
@@ -92,5 +92,16 @@ export const OperationResultSchema = z.object({
   items: z.array(z.unknown()).nullable(),
   output: z.string().nullable(),
   error: z.string().nullable(),
+})
+
+/**
+ * A one-way execute returns no `reverse`. A bidirectional ACL ADD returns the
+ * primary (forward) direction's fields at the top level plus the second
+ * (reverse) direction nested under `reverse` — each direction has its own
+ * correlation id and its own audit row; neither is nested inside the other
+ * beyond this one optional level.
+ */
+export const OperationResultSchema = OperationResultBase.extend({
+  reverse: OperationResultBase.optional(),
 })
 export type OperationResult = z.infer<typeof OperationResultSchema>

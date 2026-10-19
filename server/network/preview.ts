@@ -26,8 +26,29 @@ function finalize(lines: string[], creds: { execUsername?: string, execPassword?
 
 /** Build the redacted preview for an ACL add/delete. */
 export function buildAclPreview(input: AclPreviewInput): CommandPreview {
-  const lines = input.operation === 'ADD' ? renderAclAdd(input) : renderAclDelete(input)
-  return finalize(lines, input)
+  if (input.operation !== 'ADD') {
+    return finalize(renderAclDelete(input), input)
+  }
+
+  // Bidirectional ADD: render ONE configure-terminal block containing both the
+  // forward permit line and the reverse one (source/destination + masks swapped,
+  // same time range). The reverse direction is passed to renderAclAdd via its
+  // `reverse` field so both permit lines sit in a single ordered block — no
+  // duplicated `configure terminal`/`exit` and no new device syntax.
+  if (input.bidirectional) {
+    return finalize(renderAclAdd({
+      ...input,
+      reverse: {
+        ...input,
+        source: input.destination,
+        sourceMask: input.destinationMask,
+        destination: input.source,
+        destinationMask: input.sourceMask,
+      },
+    }), input)
+  }
+
+  return finalize(renderAclAdd(input), input)
 }
 
 /** Build the redacted preview for a route add/delete. */

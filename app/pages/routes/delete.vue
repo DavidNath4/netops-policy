@@ -45,9 +45,22 @@ const preview = ref<string | null>(null)
 const generating = ref(false)
 const executing = ref(false)
 const confirmOpen = ref(false)
-const errorMsg = ref<string | null>(null)
-const warningMsg = ref<string | null>(null)
 const result = ref<OperationResult | null>(null)
+
+// Single result/alert pop-up driving ResultDialog; replaces the two in-page
+// UAlert (error/warning) blocks. `showDialog` opens it with a variant + copy.
+const dialog = reactive({
+  open: false,
+  variant: 'success' as 'success' | 'error' | 'warning',
+  title: '',
+  message: '',
+})
+function showDialog(variant: 'success' | 'error' | 'warning', title: string, message: string) {
+  dialog.variant = variant
+  dialog.title = title
+  dialog.message = message
+  dialog.open = true
+}
 
 const { routeExists } = useOpsPrecheck()
 
@@ -60,18 +73,15 @@ function toMessage(e: unknown, fallback: string): string {
 watch(form, () => {
   preview.value = null
   result.value = null
-  warningMsg.value = null
 })
 
 // Block submit on a malformed route IP (server re-validates too).
 const ipValid = computed(() => isValidIpv4(form.routeIp))
 
 async function onGenerate() {
-  errorMsg.value = null
-  warningMsg.value = null
   result.value = null
   if (!ipValid.value) {
-    errorMsg.value = 'Enter a valid IPv4 address for Route IP.'
+    showDialog('error', 'Invalid input', 'Enter a valid IPv4 address for Route IP.')
     return
   }
   generating.value = true
@@ -79,14 +89,14 @@ async function onGenerate() {
     // Pre-check: a DELETE must already exist.
     const exists = await routeExists(form.routeIp)
     if (!exists) {
-      warningMsg.value = 'No route for this IP exists. Nothing to delete.'
+      showDialog('warning', 'Nothing to delete', 'No route for this IP exists. Nothing to delete.')
       return
     }
     const { preview: text } = await api.routeOps.preview(buildPayload())
     preview.value = text
   }
   catch (e) {
-    errorMsg.value = toMessage(e, 'Failed to generate the command preview.')
+    showDialog('error', 'Generate failed', toMessage(e, 'Failed to generate the command preview.'))
   }
   finally {
     generating.value = false
@@ -104,7 +114,6 @@ function resetFields() {
 }
 
 async function onExecuteConfirmed() {
-  errorMsg.value = null
   executing.value = true
   try {
     const res = await api.routeOps.execute(buildPayload())
@@ -117,10 +126,15 @@ async function onExecuteConfirmed() {
       await nextTick()
     }
     result.value = res
+    showDialog(
+      res.status === 'SUCCESS' ? 'success' : 'error',
+      res.status === 'SUCCESS' ? 'Execution succeeded' : 'Execution failed',
+      res.status === 'SUCCESS' ? 'The route delete executed via automation.' : 'The route delete could not be completed.',
+    )
   }
   catch (e) {
     confirmOpen.value = false
-    errorMsg.value = toMessage(e, 'Execution failed.')
+    showDialog('error', 'Execution failed', toMessage(e, 'Execution failed.'))
   }
   finally {
     executing.value = false
@@ -147,22 +161,6 @@ const inputClass
         </NuxtLink>
       </template>
     </PageHeader>
-
-    <UAlert
-      v-if="errorMsg"
-      color="error"
-      variant="soft"
-      icon="i-lucide-circle-alert"
-      :description="errorMsg"
-    />
-
-    <UAlert
-      v-if="warningMsg"
-      color="warning"
-      variant="soft"
-      icon="i-lucide-triangle-alert"
-      :description="warningMsg"
-    />
 
     <form class="flex flex-col gap-5" @submit.prevent="onGenerate">
       <!-- Execution credentials (forwarded to automation; never stored). -->
@@ -257,14 +255,6 @@ const inputClass
           <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
         </div>
 
-        <div v-if="result" class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-          <p :class="result.status === 'SUCCESS' ? 'text-ok' : 'text-bad'">
-            {{ result.status === 'SUCCESS' ? '✓ Execution succeeded' : '✗ Execution failed' }}
-          </p>
-          <pre v-if="result.output" class="mt-1 whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
-          <pre v-else-if="result.error" class="mt-1 whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
-        </div>
-
         <div class="flex justify-end gap-2">
           <button
             v-if="!preview"
@@ -298,5 +288,19 @@ const inputClass
       :loading="executing"
       @confirm="onExecuteConfirmed"
     />
+
+    <ResultDialog
+      v-model:open="dialog.open"
+      :variant="dialog.variant"
+      :title="dialog.title"
+      :message="dialog.message"
+    >
+      <template v-if="result" #body>
+        <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+          <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
+          <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+        </div>
+      </template>
+    </ResultDialog>
   </div>
 </template>

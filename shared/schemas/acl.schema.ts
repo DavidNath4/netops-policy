@@ -47,11 +47,77 @@ export const AclDeleteSchema = AclFields.merge(ExecCredentialsSchema)
 export type AclDeleteInput = z.infer<typeof AclDeleteSchema>
 
 /**
+ * Optional time-range for an ACL ADD. The user picks ONE date (`date`, an ISO
+ * `yyyy-mm-dd` string from a native date input) and ONE time (`time`, 24h
+ * `HH:mm`, default "23:59"). When present, the service derives the three exact
+ * n8n keys (objectName, date, time) from this unit; its absence means an
+ * ordinary ACL add. This is the source-of-truth shape (raw picker inputs); the
+ * wire formatting lives server-side so DELETE and no-time-range ADD are
+ * unaffected.
+ */
+export const AclTimeRangeSchema = z.object({
+  // ISO yyyy-mm-dd from the date input; must be a real calendar date.
+  date: z
+    .string()
+    .trim()
+    .regex(/^\d{4}-\d{2}-\d{2}$/, 'Date must be a valid calendar date')
+    .refine((v) => {
+      const d = new Date(`${v}T00:00:00Z`)
+      if (Number.isNaN(d.getTime())) return false
+      // Reject rollovers like 2027-02-30 (Date would normalize them).
+      return v === d.toISOString().slice(0, 10)
+    }, 'Date must be a valid calendar date'),
+  // 24-hour HH:mm; defaults to 23:59 when the user leaves it unchanged.
+  time: z
+    .string()
+    .trim()
+    .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Time must be a valid 24-hour HH:mm')
+    .default('23:59'),
+})
+export type AclTimeRangeInput = z.infer<typeof AclTimeRangeSchema>
+
+/** Full English month names, indexed 0=January..11=December. */
+const MONTH_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+] as const
+
+/**
+ * Derive the three exact n8n wire keys from a validated time-range input. Single
+ * source of this wire format, shared by the service (the real n8n body) and the
+ * command preview (display). Input `date` is an ISO `yyyy-mm-dd` string.
+ * - `objectName`: `dd-MMM-yyyy`, MMM = lowercase 3-letter English month ("30-oct-2026").
+ * - `date`: `dd MonthFullEnglish yyyy` ("30 October 2026").
+ * - `time`: 24-hour `HH:mm` ("23:59").
+ */
+export function deriveAclTimeRange(tr: AclTimeRangeInput): {
+  objectName: string
+  date: string
+  time: string
+} {
+  const [year, month, day] = tr.date.split('-')
+  const monthFull = MONTH_NAMES[Number(month) - 1]!
+  return {
+    objectName: `${day}-${monthFull.slice(0, 3).toLowerCase()}-${year}`,
+    date: `${day} ${monthFull} ${year}`,
+    time: tr.time,
+  }
+}
+
+/**
  * Preview request: which operation to preview + its fields. Only ADD/DELETE are
  * previewable (SHOW is read-only and runs immediately, no preview).
  */
 export const AclPreviewSchema = z.discriminatedUnion('operation', [
-  z.object({ operation: z.literal('ADD') }).merge(AclFields).merge(ExecCredentialsSchema),
+  z.object({ operation: z.literal('ADD') })
+    .merge(AclFields)
+    .merge(ExecCredentialsSchema)
+    // Optional: present only for an ADD with a time range (all-or-none unit).
+    .extend({ timeRange: AclTimeRangeSchema.optional() })
+    // Optional bidirectional ADD (ADD only): when true the server ALSO adds the
+    // reverse direction (source<->destination and their masks swapped) as a
+    // second, independent n8n ACL ADD call. Absent/false = ordinary one-way add.
+    .extend({ bidirectional: z.boolean().optional() }),
   z.object({ operation: z.literal('DELETE') }).merge(AclFields).merge(ExecCredentialsSchema),
 ])
 export type AclPreviewInput = z.infer<typeof AclPreviewSchema>

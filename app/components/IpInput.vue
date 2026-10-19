@@ -14,7 +14,12 @@ const props = defineProps<{
   placeholder?: string
 }>()
 
-const emit = defineEmits<{ 'update:modelValue': [value: string] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: string]
+  // Fired when the field loses focus, so a caller can post-process the final
+  // value (e.g. ACL add applies its IP auto-correction on blur).
+  'blur': [value: string]
+}>()
 
 function onInput(e: Event) {
   const el = e.target as HTMLInputElement
@@ -23,6 +28,10 @@ function onInput(e: Event) {
   // after a stripped char.
   if (el.value !== clean) el.value = clean
   emit('update:modelValue', clean)
+}
+
+function onBlur() {
+  emit('blur', props.modelValue)
 }
 
 // null until something is typed; true/false once there is input.
@@ -45,6 +54,7 @@ const valid = computed<boolean | null>(() => {
       class="h-[38px] w-full rounded-md border bg-panel pl-3 pr-9 text-xs text-ink outline-none focus:border-brand"
       :class="valid === false ? 'border-bad' : 'border-line'"
       @input="onInput"
+      @blur="onBlur"
     >
     <span
       v-if="valid !== null"

@@ -2,32 +2,50 @@
 
 ## Introduction
 
-This spec defines how NetOps Policy Manager delegates the **execution** of ACL and route operations to an external **n8n** automation workflow, and how it turns each operation into an auditable, redacted, correlation-tracked record. It is the contract between this application (the operator interface + audit system of record) and n8n (the executor that reaches network devices through an SSH jump host).
+This spec is the single authoritative document for how NetOps Policy Manager
+delegates the **execution** of ACL and route operations to an external **n8n**
+automation workflow, and how it turns each operation into an auditable, redacted,
+correlation-tracked record. It is the contract between the application (operator
+interface + audit system of record) and n8n (the executor that reaches network
+devices through an SSH jump host).
 
-The key architectural facts this spec formalizes:
+Key architectural facts:
 
-- This application never opens a session to a network device. It sends **field payloads** (not rendered command strings) to n8n over an authenticated webhook, and n8n composes and runs the actual device command.
-- For add/delete, the application shows a **redacted command preview** built from a static template so the engineer can review intent before executing. The preview is display-only and is never sent to n8n.
-- The per-engineer **execution credentials** are forwarded to n8n so it can act as that engineer, but they are never persisted and never returned to the client; they appear only as `***` in previews and audit.
-- A single **correlation id** ties one operation together across the whole chain: Web App request → n8n execution → device command → device response.
-- The application's database is an audit/logging layer. There are **no ACL/route configuration-state tables** (`acl_policies`/`routes`) — the app persists no device config. Every show/add/delete produces one master `audit_logs` row; for ACL/ROUTE it may also write one `acl_logs`/`route_logs` **audit-detail** row (deeper execution-inspection detail, written in the same transaction and linked to the master by `audit_id` + `correlation_id`). The detail tables complement, and never replace, `audit_logs` (see Requirement 12).
+- The application never opens a device session. It sends **field payloads** (not
+  rendered command strings) to n8n over an authenticated webhook; n8n composes
+  and runs the actual device command.
+- For add/delete, the application shows a **redacted command preview** built from
+  a static template so the engineer can review intent. The preview is
+  display-only and is never sent to n8n.
+- The per-engineer **execution credentials** are forwarded to n8n so it can act
+  as that engineer, but they are never persisted for add/delete and never
+  returned to the client; they appear only as `***` in previews and audit.
+- A single **correlation id** ties one operation together across the chain:
+  Web request → n8n execution → device command → device response.
+- There are **no ACL/route configuration-state tables**. Every show/add/delete
+  produces one master `audit_logs` row; for ACL/ROUTE it may also write one
+  `acl_logs` / `route_logs` audit-detail row. Those detail tables are documented
+  authoritatively in the `log-trail/` spec; this spec summarizes them and
+  cross-links.
 
-This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, the main `requirements.md`/`design.md` reference this document (Req 4, 6, 7, 8, 14). The webhook request/response shapes are intentionally flexible and MAY change as n8n evolves; the requirements below fix the contract's guarantees, not the exact field list.
+System-wide concepts (architecture, layering, envelope, correlation id, config)
+live in the `general/` spec. The ACL/ROUTE workflow lives in the
+`netops-policy-manager/` spec. The iTop ticket integration — including the
+server-side ticket-existence guard that runs before an execute reaches n8n — is
+documented authoritatively in the `ticketing-itop/` spec and only summarized
+here (Requirement 12).
 
 ## Glossary
 
-- **N8N_Client**: The single server-side component in this application that calls n8n. Nothing else in the app talks to n8n.
+- **N8N_Client**: The single server-side component that calls n8n (`server/network/n8n-client.ts`). Nothing else in the application talks to n8n.
 - **N8N_Executor**: The external n8n workflow(s) that receive a field payload, connect to the target device via the SSH jump host, run the command, and return the result.
-- **Webhook_Endpoint**: An n8n webhook URL that receives one operation. There is one logical endpoint per operation the app supports (ACL show/add/delete, route show/add/delete).
-- **Field_Payload**: The JSON body the app sends to n8n for one operation — the operator's field values plus the correlation id and the execution credentials. It contains no rendered command string.
-- **Execution_Credentials**: The per-engineer device `execUsername` / `execPassword` used so n8n can act as that engineer on the device. There are two lifetimes: for **add/delete** they are supplied per operation and never persisted; for **read** operations (show/list/search/detail) they are the Device_Session_Credentials (below). In all cases they are never returned to the client except via the owner's explicit reveal, never logged, and redacted to `***` in previews and audit.
-- **Device_Session_Credentials**: The engineer's device `execUsername` / `execPassword`, entered once on the ACL/Route show page and held **encrypted (AES-256-GCM) on that engineer's session row**, valid for the lifetime of the login session (no separate TTL). The backend auto-fills them for read operations (show/list/search/detail) so the engineer does not re-type them. They are wiped on logout, on manual clear, and on TTL expiry, are never written to any audit log, and are revealed back to the owning engineer only through an explicit reveal endpoint.
-- **N8N_API_Key**: A shared secret held by both this application (server-side, from `N8N_API_KEY`) and n8n, sent on every call to authenticate the app to n8n.
-- **Correlation_Id**: A UUID generated by the app per operation, sent to n8n in the payload (and/or a header), expected back in the response, and stored on the audit log.
-- **Command_Preview**: The redacted, display-only command string the app builds from a static Command_Template plus the operator's fields, for add/delete review.
-- **Command_Template**: One of four static (hardcoded) command shapes maintained in the app — ACL add, ACL delete, route add, route delete — with placeholders for field values. Preview only.
-- **N8N_Result**: The normalized result the N8N_Client returns to the service after a call: `{ status: SUCCESS | FAILED, output?, error?, execution? }`.
-- **Execution_Metadata**: n8n-provided data about how the operation ran: executor, workflow id, execution id, timestamps, duration. Stored in the audit `execution_payload`.
+- **Webhook_Endpoint**: An n8n webhook URL that receives one operation, resolved per operation as `<N8N_BASE_URL>/<module>/<action>` in lowercase (e.g. `<base>/acl/show`, `<base>/route/add`).
+- **Field_Payload**: The JSON body the application sends to n8n for one operation — the operator's field values plus the execution credentials. It contains no rendered command string and no correlation id (the correlation id travels in a header).
+- **Execution_Credentials**: The per-engineer device `user` / `pass` used so n8n can act as that engineer. For add/delete they are supplied per operation and never persisted; for reads they are the Device_Session_Credentials (Requirement 11). Never returned to the client except via the owner's reveal, never logged, redacted to `***` in previews/audit.
+- **Device_Session_Credentials**: The engineer's device username/password, entered once on the ACL/Route show page and held AES-256-GCM-encrypted on that engineer's session row for the lifetime of the login session (no separate TTL). Auto-filled by the server for read operations, revealed only to the owner, removed on clear/logout/expiry, never audited.
+- **N8N_API_Key**: A shared secret held by the application (server-side, from `N8N_API_KEY`) and by n8n, sent on every call in the `X-NetOps-Internal-Key` header to authenticate the app to n8n.
+- **Correlation_Id**: A UUID generated per operation, sent to n8n in the `x-correlation-id` header, and stored on the audit log.
+- **N8nResult**: The normalized result the N8N_Client returns: `{ status: SUCCESS | FAILED, output?, error?, message?, total?, items?, device? }`.
 
 ## Requirements
 
@@ -38,11 +56,11 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 #### Acceptance Criteria
 
 1. THE N8N_Client SHALL be the only component in the application that issues requests to n8n; services SHALL reach n8n exclusively through it.
-2. WHEN the N8N_Client calls a Webhook_Endpoint, THE N8N_Client SHALL include the N8N_API_Key (as an HTTP header) to authenticate the application to n8n.
-3. THE N8N_Client SHALL send the request to n8n over HTTP(S) using the base URL/webhook configuration from `N8N_BASE_URL`, and SHALL never place the Execution_Credentials in a URL or query string.
-4. THE N8N_Client SHALL send a Field_Payload as the request body and SHALL NOT send a rendered command string; the N8N_Executor is responsible for composing and running the device command.
+2. WHEN the N8N_Client calls a Webhook_Endpoint, THE N8N_Client SHALL authenticate the application to n8n with the `X-NetOps-Internal-Key` header set to `N8N_API_KEY`.
+3. THE N8N_Client SHALL send the request to the URL resolved from `N8N_BASE_URL` as `<base>/<module>/<action>` (lowercase, singular `acl`/`route`), handling a base with or without a trailing slash, and SHALL never place the Execution_Credentials in a URL or query string.
+4. THE N8N_Client SHALL send a Field_Payload as the request body and SHALL NOT send a rendered command string; the N8N_Executor composes and runs the device command.
 5. THE application SHALL keep the N8N_API_Key server-side only and SHALL never expose it to the client or place it in `runtimeConfig.public`.
-6. THE application SHALL NOT open any SSH/NETCONF/API session to a network device; all device access SHALL occur inside the N8N_Executor.
+6. THE application SHALL NOT open any SSH/NETCONF/API session to a device; all device access SHALL occur inside the N8N_Executor.
 
 ### Requirement 2: Operation set and endpoint mapping
 
@@ -51,10 +69,9 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 #### Acceptance Criteria
 
 1. THE integration SHALL support six operations: ACL show, ACL add, ACL delete, route show, route add, and route delete.
-2. THE N8N_Client SHALL route each operation to its configured Webhook_Endpoint (one logical endpoint per operation), resolved from configuration.
-3. WHERE the deployment uses a single n8n webhook with an operation discriminator instead of separate URLs, THE Field_Payload SHALL carry `module` (`ACL` | `ROUTE`) and `action` (`SHOW` | `ADD` | `DELETE`) so n8n can dispatch.
-4. THE show operations SHALL be treated as read-only and SHALL execute without a confirmation step in the app.
-5. THE add and delete operations SHALL be treated as configuration-changing and SHALL require a preview + explicit confirmation in the app before the N8N_Client is called.
+2. THE N8N_Client SHALL route each operation to `<base>/<module>/<action>`, i.e. `POST <base>/acl/show`, `/acl/add`, `/acl/delete`, `/route/show`, `/route/add`, `/route/delete`.
+3. THE show operations SHALL be treated as read-only and SHALL execute without a confirmation step in the app.
+4. THE add and delete operations SHALL be treated as configuration-changing and SHALL require a preview + explicit confirmation in the app before the N8N_Client is called.
 
 ### Requirement 3: Correlation id propagation
 
@@ -63,48 +80,49 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 #### Acceptance Criteria
 
 1. WHEN an operation begins, THE application SHALL generate a unique Correlation_Id (UUID) for it.
-2. THE N8N_Client SHALL send the Correlation_Id to n8n (in the Field_Payload and/or an HTTP header) on every call.
+2. THE N8N_Client SHALL send the Correlation_Id to n8n in the `x-correlation-id` HTTP header on every call.
 3. THE application SHALL record the Correlation_Id on the audit log for that operation.
-4. WHERE n8n returns a Correlation_Id in its response, THE application SHALL treat a mismatch with the sent Correlation_Id as an integrity concern and SHALL record the operation as FAILED.
-5. THE Correlation_Id SHALL be queryable in the Log Trail so all records of one operation can be retrieved together.
+4. THE Correlation_Id SHALL be queryable in the Log Trail so all records of one operation can be retrieved together (log-trail spec).
 
 ### Requirement 4: Field payloads per operation
 
 **User Story:** As an integrator, I want defined (but flexible) field payloads per operation, so that n8n receives exactly what it needs to build each command.
 
+The browser form collects more than the webhook needs (masks entered separately, a required `changeTicket`); the service maps the fields down to the contract below before calling n8n. `source`/`destination` are joined `"IP MASK"` strings.
+
 #### Acceptance Criteria
 
 1. THE application SHALL validate the operator's fields with the shared Zod schemas before building any Field_Payload.
-2. THE ACL add Field_Payload (current dev-phase contract) SHALL send `{ user, pass, source, destination }`, where `source`/`destination` are joined `"IP MASK"` strings; the form also collects source/destination masks separately and an optional change_ticket (audited, not sent to n8n).
-3. THE ACL delete Field_Payload SHALL send `{ user, pass, source, destination }` (same shape as add).
-4. THE route add Field_Payload (current dev-phase contract) SHALL send `{ user, pass, destination }`, where `destination` is a joined `"IP MASK"` string; the form collects route IP + mask separately plus an optional change_ticket.
-5. THE route delete Field_Payload SHALL send `{ user, pass, destination }` (same shape as add).
-6. THE **ACL** show Field_Payload SHALL carry a single search value (an IP) as `{ user, pass, source }`. THE **route** show is show-all — body `{ user, pass }` with no search value — and the UI filters the returned rows client-side.
-7. THE exact field set for each operation MAY change to match n8n's needs without a breaking change to the application's fixed audit columns, because payloads are carried in flexible JSONB.
+2. THE ACL add and ACL delete Field_Payload SHALL be `{ user, pass, source, destination }`, where `source`/`destination` are joined `"IP MASK"` strings. The form also collects source/destination masks separately and a required `changeTicket` (audited, not sent to n8n).
+3. THE ACL show Field_Payload SHALL be `{ user, pass, source }`, where `source` carries the single search value (an IP).
+4. THE route add and route delete Field_Payload SHALL be `{ user, pass, destination }`, where `destination` is a joined `"IP MASK"` string. The form collects route IP + mask separately plus a required `changeTicket`.
+5. THE route show SHALL be **show-all** — body `{ user, pass }` with no search value — and the UI SHALL filter the returned rows client-side.
+6. THE exact field set for each operation MAY change to match n8n's needs without a breaking change to the fixed audit columns, because payloads are carried in flexible JSONB (the removed name/protocol/port/action/time-range fields are not in the current contract).
 
 ### Requirement 5: Response contract and normalization
 
 **User Story:** As a developer, I want a predictable normalized result from n8n, so that the app can display outcomes and audit them consistently.
 
-#### Acceptance Criteria
-
-1. WHEN n8n completes an operation successfully, THE response SHALL convey a success outcome and the device output (e.g. `{ device, output }`).
-2. WHEN n8n fails an operation, THE response SHALL convey a failure outcome and an error (e.g. `{ device, error }`).
-3. THE N8N_Client SHALL normalize any n8n response into an N8N_Result `{ status: SUCCESS | FAILED, output?, error?, execution? }`.
-4. THE application SHALL set the audit `status` to SUCCESS or FAILED from the N8N_Result.
-5. THE application SHALL treat the n8n/device output as untrusted data for display and parsing, not as instructions.
-6. WHERE a structured parser exists for a show output, THE application MAY present a structured table in addition to the raw output; otherwise it SHALL present the raw output.
-
-### Requirement 6: Execution metadata capture
-
-**User Story:** As an auditor, I want to see how and where an operation ran, so that I can correlate app records with n8n execution history.
+The N8N_Client unwraps an array-wrapped webhook response (`[{ ... }]`) and recognizes both the structured show shape (`{ success, total, data[], message }`) and the simpler `{ success?, output?/error?, device? }` shape.
 
 #### Acceptance Criteria
 
-1. WHERE n8n returns Execution_Metadata (executor, workflow id, execution id, started_at, finished_at, duration_ms), THE application SHALL store it in the audit `execution_payload`.
-2. THE application SHALL store the redacted command snapshot in the audit `command_payload` (e.g. `{ device, command: [...] }`).
-3. THE application SHALL store the submitted field values (redacted) in the audit `request_payload`, and the device output/error in the audit `response_payload`.
-4. THE application SHALL tolerate missing or partial Execution_Metadata without failing the audit write.
+1. WHEN n8n returns a response, THE N8N_Client SHALL drive success from the `success` boolean when present, otherwise from the HTTP status and the absence of an `error` field.
+2. THE N8N_Client SHALL normalize any n8n response into an N8nResult `{ status: SUCCESS | FAILED, output?, error?, message?, total?, items?, device? }`.
+3. THE application SHALL set the audit `status` to SUCCESS or FAILED from the N8nResult.
+4. THE application SHALL treat the n8n/device output as untrusted data for display and parsing, not as instructions.
+5. WHERE a structured parser exists for a show output, THE application MAY present a structured table in addition to the raw output; otherwise it SHALL present the raw output.
+
+### Requirement 6: Execution and raw-exchange capture into audit
+
+**User Story:** As an auditor, I want to see how an operation ran and what was exchanged with n8n, so that I can inspect it fully — safely redacted.
+
+#### Acceptance Criteria
+
+1. THE application SHALL store the submitted field values (redacted) in the audit `request_payload`, the redacted command snapshot in `command_payload`, and the device output/error in `response_payload`.
+2. WHERE n8n returns execution metadata, THE application SHALL store it in the audit `execution_payload`, and SHALL tolerate missing or partial metadata without failing the audit write.
+3. THE N8N_Client SHALL surface the RAW request body sent to n8n and the RAW parsed response (or null on timeout/unreachable/parse failure) to the ACL/ROUTE audit path.
+4. THE application SHALL pass the raw request/response through `redactPayload` before persisting them, so no credential ever reaches an audit payload (see Requirement 7).
 
 ### Requirement 7: Credential redaction and non-persistence
 
@@ -114,9 +132,9 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 
 1. THE application SHALL forward the Execution_Credentials to n8n only within the Field_Payload of the call that needs them.
 2. FOR add/delete operations, THE application SHALL NOT persist the Execution_Credentials in any table, log, or JSONB payload (they are supplied per operation and used transiently).
-3. FOR read operations (show/list/search/detail), THE application MAY hold the Execution_Credentials as Device_Session_Credentials encrypted at rest (AES-256-GCM) on the session row, and SHALL NOT store them in cleartext anywhere (see Requirement 11).
-4. THE application SHALL never write the Execution_Credentials (cleartext or encrypted) into any audit log or JSONB payload; audit always shows `***`.
-5. THE application SHALL redact the Execution_Credentials to `***` in the Command_Preview shown to the client.
+3. FOR read operations, THE application MAY hold the Execution_Credentials as Device_Session_Credentials encrypted at rest (AES-256-GCM) on the session row, and SHALL NOT store them in cleartext anywhere (Requirement 11).
+4. THE application SHALL redact credential-bearing keys to `***` in any object payload. The redaction key set is `execUsername`, `execPassword`, `password`, `pass`, `user`, `apiKey`, `apiToken`.
+5. THE application SHALL also redact credential values that appear inline in a rendered preview string (defense-in-depth), and SHALL show the Execution_Credentials only as `***` in the Command_Preview.
 6. THE application SHALL never return the Execution_Credentials to the client in any response, except the owning engineer's explicit reveal of their own Device_Session_Credentials (Requirement 11).
 7. THE application SHALL never log the Execution_Credentials, the N8N_API_Key, or any device SSH credential.
 
@@ -126,11 +144,11 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 
 #### Acceptance Criteria
 
-1. THE N8N_Client SHALL enforce a request timeout from `N8N_TIMEOUT_MS` on every call to n8n.
-2. IF the N8N_Client cannot reach n8n, the request times out, or n8n returns a non-success HTTP status, THEN THE application SHALL record the operation as a FAILED audit log capturing the error.
+1. THE N8N_Client SHALL bound every call to n8n with an `AbortController` timeout from `N8N_TIMEOUT_MS`.
+2. IF the N8N_Client cannot reach n8n, the request times out, or n8n returns a non-success response, THEN THE N8N_Client SHALL resolve to a FAILED N8nResult with a safe message (`n8n request timed out` / `n8n is unreachable`) and SHALL NOT throw, so the application can record a FAILED audit log capturing the error.
 3. WHEN an operation fails for any reason, THE application SHALL return a safe API error to the client that excludes the Execution_Credentials, the N8N_API_Key, internal URLs, and stack traces.
 4. THE application SHALL still generate and record the Correlation_Id for a failed operation.
-5. THE application SHALL NOT automatically retry a configuration-changing operation (add/delete) on timeout, to avoid duplicate device changes, unless an explicit, idempotency-safe retry mechanism is defined.
+5. THE application SHALL NOT automatically retry a configuration-changing operation (add/delete) on timeout, to avoid duplicate device changes.
 
 ### Requirement 9: Static command preview templates
 
@@ -138,11 +156,11 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 
 #### Acceptance Criteria
 
-1. THE application SHALL maintain four static Command_Templates: ACL add, ACL delete, route add, and route delete.
-2. WHEN building a Command_Preview, THE application SHALL substitute the operator's submitted field values into the matching Command_Template.
+1. THE application SHALL maintain four static Command_Templates — ACL add, ACL delete, route add, route delete — in `server/network/command-templates.ts`.
+2. WHEN building a Command_Preview, THE application SHALL substitute the submitted field values into the matching template; credentials are not interpolated into the command lines.
 3. THE Command_Preview SHALL be produced on the server and returned to the client for display only.
 4. THE Command_Preview SHALL NOT be sent to n8n and SHALL NOT be the basis of execution; n8n composes the executed command from the Field_Payload.
-5. WHERE a Command_Template diverges from what n8n actually runs, THE application SHALL treat the preview as indicative for review; keeping the template aligned with n8n's command is a maintenance goal, not a correctness guarantee of execution.
+5. WHERE a Command_Template diverges from what n8n actually runs, THE application SHALL treat the preview as indicative; keeping the template aligned is a maintenance goal, not a correctness guarantee.
 
 ### Requirement 10: Configuration
 
@@ -150,105 +168,86 @@ This is a sub-spec of NetOps Policy Manager. Where it intersects the main spec, 
 
 #### Acceptance Criteria
 
-1. THE application SHALL read the n8n integration settings from environment: `N8N_BASE_URL` (and/or per-operation webhook URLs), `N8N_API_KEY`, and `N8N_TIMEOUT_MS`.
-2. WHEN the application starts, THE Config_Service SHALL validate these variables with the Zod `EnvSchema` and SHALL halt startup if a required n8n variable is missing or invalid.
+1. THE application SHALL read the n8n settings from environment: `N8N_BASE_URL`, `N8N_API_KEY`, and `N8N_TIMEOUT_MS`.
+2. WHEN the application starts, THE Config_Service SHALL validate these variables with the Zod `EnvSchema` and SHALL halt startup if a required n8n variable is missing or invalid (general spec, Req 7).
 3. THE `.env.example` SHALL contain placeholder entries (without real values) for the n8n variables.
 4. THE application SHALL keep `N8N_API_KEY` out of `runtimeConfig.public` and out of every client response.
 
 ### Requirement 11: Device Session Credentials (read operations)
 
-**User Story:** As a network engineer, I want to enter my device username/password once per login and have every read (show/search) use it automatically until I log out, so that I don't re-type it for each lookup — while it stays protected.
+**User Story:** As a network engineer, I want to enter my device username/password once per login and have every read use it automatically until I log out, so that I don't re-type it for each lookup — while it stays protected.
 
-Read operations (show/search) call n8n frequently, so requiring the device credentials on every call is impractical. This requirement lets an engineer set them once per login session; the backend validates them once, then auto-fills them for reads for the life of the session. Add/delete are NOT covered here — they still take the credentials per operation (Requirement 7.2).
+Read operations call n8n frequently, so requiring credentials on every call is impractical. An engineer sets them once per login session; the backend validates them once, then auto-fills them for reads for the life of the session. Add/delete are not covered here (Requirement 7.2). The service is `server/services/device-credential.service.ts`.
 
 #### Acceptance Criteria
 
-1. WHEN an authenticated engineer submits their device `execUsername` and `execPassword` to the set-credentials endpoint, THE application SHALL first validate them against the n8n `user/validate` webhook, and only on `success: true` SHALL store them encrypted with AES-256-GCM on that engineer's session row (never in cleartext).
-2. IF the `user/validate` webhook returns `success: false` (or is unreachable/times out), THEN THE application SHALL reject the set request with the returned message (or a safe generic error) and SHALL NOT store any credentials.
+1. WHEN an authenticated engineer submits their device `execUsername` and `execPassword` to `POST /api/session/device-credentials`, THE application SHALL first validate them against the n8n `POST <base>/user/validate` webhook (with the `X-NetOps-Internal-Key` header), and only on `success: true` SHALL store them encrypted with AES-256-GCM on that engineer's session row.
+2. IF the `user/validate` call returns `success: false`, is unreachable, or times out, THEN THE application SHALL reject the set request with the returned message (or a safe generic error) and SHALL NOT store any credentials.
 3. THE application SHALL scope the Device_Session_Credentials to the engineer's own session only; another user's session SHALL never see or use them.
-4. THE Device_Session_Credentials SHALL remain valid for the lifetime of the login session (no separate shorter TTL); they are treated as present as long as the session is valid, and absent once the session ends.
-5. WHEN an engineer performs a read operation (ACL/Route show/search) and Device_Session_Credentials exist, THE application SHALL decrypt them server-side and use them as the Execution_Credentials for the n8n call, without requiring the client to resend them and without re-validating.
-6. IF a read operation is attempted with no Device_Session_Credentials (never set or cleared), THEN THE application SHALL reject it with a clear "device credentials required" error and SHALL prompt the engineer to enter them.
-7. WHEN the owning engineer requests to reveal their Device_Session_Credentials (the password eye-toggle), THE application SHALL return the decrypted values to that engineer only, and SHALL NOT expose them to any other user.
-8. WHEN the engineer clicks Clear Credentials, THE application SHALL delete the Device_Session_Credentials from the session row immediately.
+4. THE Device_Session_Credentials SHALL remain valid for the lifetime of the login session with no separate TTL; they are present while the session is valid and absent once it ends. (A `device_cred_expires_at` column exists from the initial migration but is unused.)
+5. WHEN an engineer performs a read operation and Device_Session_Credentials exist, THE application SHALL decrypt them server-side and use them as the Execution_Credentials for the n8n call, without the client resending them and without re-validating.
+6. IF a read operation is attempted with no Device_Session_Credentials, THEN THE application SHALL reject it with `DEVICE_CREDENTIALS_REQUIRED` and prompt the engineer to enter them.
+7. WHEN the owning engineer calls `GET /api/session/device-credentials/reveal`, THE application SHALL return the decrypted values to that engineer only, and SHALL NOT expose them to any other user.
+8. WHEN the engineer calls `DELETE /api/session/device-credentials`, THE application SHALL clear the Device_Session_Credentials from the session row immediately.
 9. WHEN the engineer logs out or the session ends/expires, THE application SHALL ensure the Device_Session_Credentials are gone (they live on the session row and are removed with it).
 10. THE application SHALL never write the Device_Session_Credentials (cleartext or encrypted) to any audit log, and SHALL never log them.
-11. THE application SHALL surface only a boolean "credentials set" state (and their non-secret username, if shown) to the UI by default; the password is returned only via the explicit owner reveal in criterion 7.
-12. THE add/delete operations SHALL NOT auto-fill from the Device_Session_Credentials; they SHALL continue to require the credentials per operation (Requirement 7.2).
-13. THE application SHALL send the `X-NetOps-Internal-Key` API key header on the `user/validate` call, as on every other n8n call.
+11. THE `GET /api/session/device-credentials` endpoint SHALL return only a non-secret status `{ set, username? }`; the password is returned only via the explicit owner reveal in criterion 7.
+12. THE add/delete operations SHALL NOT auto-fill from the Device_Session_Credentials; they SHALL require the credentials per operation (Requirement 7.2).
 
-### Requirement 12: ACL/Route audit-detail tables (complement to `audit_logs`)
+### Requirement 12: ACL/Route audit-detail tables (summary; authoritative in log-trail/)
 
-**User Story:** As a compliance auditor, I want deeper execution-inspection detail for the sensitive ACL and route operations, so that I can inspect exactly what each ACL/route call did without this changing the device-config boundary.
+**User Story:** As a compliance auditor, I want deeper execution-inspection detail for ACL and route operations, so that I can inspect what each call did without changing the device-config boundary.
 
-This requirement adds two **audit-detail** tables, `acl_logs` and `route_logs`, that complement the master `audit_logs` trail for ACL/ROUTE operations. They are an auditing refinement, not a store of device configuration state: the application still persists **no** `acl_policies`/`routes` configuration rows and still delegates all execution to n8n (Out of Scope items 3, 4).
+The `acl_logs` / `route_logs` audit-detail tables are documented authoritatively
+in the `log-trail/` spec. This spec records only the n8n-side facts that produce
+them.
 
 #### Acceptance Criteria
 
 1. THE application SHALL continue to record every ACL/ROUTE show/add/delete as one master `audit_logs` row; the detail tables SHALL NOT replace that master trail.
-2. FOR an ACL operation, THE application MAY write one `acl_logs` row, and FOR a route operation one `route_logs` row, holding execution-inspection detail for that operation.
-3. THE application SHALL write the detail row in the SAME database transaction as its master `audit_logs` row, so a detail row never exists without its master.
-4. THE application SHALL link each detail row to its master via `audit_id` (foreign key → `audit_logs.id`, `ON DELETE CASCADE`) and SHALL also carry the operation's `correlation_id` on the detail row.
-5. THE `acl_logs` table SHALL carry the columns `id` (UUID PK), `audit_id`, `correlation_id`, `action` (SHOW | ADD | DELETE), `status` (SUCCESS | FAILED), `device`, `source`, `destination`, `command_preview` (JSONB), `execution_meta` (JSONB), `response_summary` (JSONB), and `created_at`, with indexes on `audit_id`, `correlation_id`, and `created_at`.
-6. THE `route_logs` table SHALL carry the same columns as `acl_logs` except that it SHALL replace `source` with `change_ticket` (indexed) while keeping `destination`, with indexes on `audit_id`, `correlation_id`, `created_at`, and `change_ticket`.
-7. THE application SHALL redact every JSONB value written to a detail row (via the same redaction used for `audit_logs`) and SHALL NEVER store a credential or password in a detail row.
-8. THE application SHALL expose read-only, authenticated endpoints that require no feature permission (mirroring `/api/audit`): `GET /api/acl-logs`, `GET /api/acl-logs/correlation/:id`, `GET /api/route-logs`, and `GET /api/route-logs/correlation/:id`.
-9. THE application SHALL NOT expose any endpoint that deletes or mutates detail rows during normal operation.
+2. FOR an ACL operation THE application MAY write one `acl_logs` row, and FOR a route operation one `route_logs` row, in the SAME database transaction as the master row, linked by `audit_id` (FK → `audit_logs.id`, `ON DELETE CASCADE`) and `correlation_id`.
+3. THE application SHALL redact every JSONB value written to a detail row and SHALL NEVER store a credential in a detail row.
+4. THE application SHALL expose read-only, authenticated endpoints that require no feature permission: `GET /api/acl-logs`, `GET /api/acl-logs/correlation/:id`, `GET /api/route-logs`, `GET /api/route-logs/correlation/:id` (full schema and UI in the log-trail spec).
 
-### Requirement 13: iTop ticket lookup and change-ticket selection
+### Requirement 13: Server-side iTop ticket-existence guard on execute (summary; authoritative in ticketing-itop/)
 
-**User Story:** As a network engineer, I want to search a read-only iTop ticket store and pick the exact change ticket before I generate/execute an ACL or route change, so that every change is tied to a real, auditable ticket.
+**User Story:** As a security administrator, I want the server to confirm the supplied change ticket exists before any ACL/Route add or delete runs, so that a direct API call cannot execute against a fake but well-formed ticket ref.
 
-iTop is a foreign, read-only MariaDB queried directly from the server (SELECT only). The ticket picker gates ACL/Route add and delete: the engineer searches, previews the ticket, and selects it; the selected `ref` fills the already-audited `changeTicket` field. Two admin-only "Test Connection" diagnostics (iTop + n8n) round out the operability story.
+This is the n8n-side view of the guard documented authoritatively in the
+`ticketing-itop/` spec. It runs in the ACL/ROUTE service layer before the
+N8N_Client is called.
 
 #### Acceptance Criteria
 
-1. R1 — WHEN an authenticated engineer submits a non-empty query on an ACL/Route add or delete page, THE system SHALL search the iTop `ticket` parent table by `ref` and `title` (case-insensitive, substring) across ALL ticket types and return at most `limit` (default 20, max 50) summaries, without filtering by status.
-2. R2 — THE search SHALL query only the parent `ticket` table (no joins, no heavy `ORDER BY`) using parameterized placeholders, bounded by a query timeout.
-3. R3 — IF the query is empty, longer than 64 chars, or missing, THEN THE system SHALL reject the request with `VALIDATION_ERROR` and SHALL NOT touch iTop.
-4. R4 — IF iTop is unconfigured, unreachable, or times out, THEN THE system SHALL return `ITOP_UNREACHABLE` with a safe message and SHALL NOT surface SQL, stack, connection string, or credentials.
-5. R5 — WHEN an engineer selects a ticket `ref`, THE system SHALL fetch that single ticket row by its indexed `ref`, join only the one type-specific detail table resolved from `finalclass`, resolve contact/organization names via separate PK `IN (...)` lookups, and return a detail object (summary + resolved caller name/email + organization name + a per-type detail block + description).
-6. R6 — THE preview SHALL pass all iTop-sourced strings as plain text; the UI SHALL render ALL of them escaped (`{{ }}`, never `v-html` or any raw-HTML sink) because iTop rich-text fields may contain HTML/script.
-7. R7 — IF no ticket matches the `ref`, THEN THE system SHALL return `NOT_FOUND`.
-8. R8 — THE preview response SHALL contain only mapped, whitelisted fields (never a raw DB row).
-9. R9 — THE `changeTicket` field SHALL be REQUIRED on ACL add/delete and Route add/delete (the shared `ChangeTicketSchema`, bounded 1..64, unchanged).
-10. R10 — WHEN an engineer selects a ticket, THE form SHALL set `changeTicket = ticket.ref` (e.g. `C-035919`).
-11. R11 — WHILE no ticket is selected, THE Generate and Execute buttons SHALL stay disabled on all four forms.
-12. R12 — THE existing `changeTicket` audit behavior SHALL remain unchanged (the selected `ref` flows into the already-audited field; Log Trail code is not touched).
-13. R13 — WHEN an administrator clicks "Test iTop Connection", THE system SHALL run a read-only `SELECT 1` against iTop bounded by the iTop timeout and return `{ ok, message }`.
-14. R14 — WHEN an administrator clicks "Test n8n Connection", THE system SHALL perform a lightweight, `N8N_TIMEOUT_MS`-bounded probe against n8n and return `{ ok, message }` without leaking the API key; an HTTP status `>= 500` SHALL be reported as `ok: false` (degraded), and only a sub-500 response SHALL count as reachable.
-15. R15 — THE two test endpoints SHALL require `assertSameOrigin` + `requirePermission(ADMINISTRATION_MANAGE)`; their buttons SHALL be visible only when `canManage` is true.
-16. R16 — IF iTop is not configured, THEN the iTop test SHALL return `{ ok: false, message }` (never throw, never block boot).
-17. R17 — THE app SHALL boot successfully when `ITOP_DATABASE_URL` is unset (optional env var); iTop features SHALL surface the missing config only at call time as `ITOP_UNREACHABLE` / a failed test result.
+1. WHEN an engineer executes an ACL or ROUTE add/delete, THE service SHALL, as the FIRST step before building the preview, calling n8n, or writing any audit row, verify the supplied `changeTicket` exists in iTop (via `getTicketByRef`).
+2. IF the ticket is not found, THEN THE service SHALL reject with `TICKET_NOT_FOUND` (HTTP 404) and SHALL NOT call n8n and SHALL NOT write any audit row.
+3. IF iTop is unconfigured, unreachable, or times out, THEN THE service SHALL reject with `ITOP_UNREACHABLE` (HTTP 503) and SHALL NOT call n8n and SHALL NOT write any audit row (block-total posture).
+4. THE guard SHALL apply to EXECUTE only (ACL/ROUTE add + delete); show and preview SHALL be unchanged.
 
-### Requirement 14: Server-side iTop ticket-existence check on ACL/Route execute
+### Requirement 14: Connectivity probe (Test n8n)
 
-**User Story:** As a security administrator, I want the server to confirm the supplied change ticket actually exists in iTop before any ACL/Route add or delete runs, so that a direct API call cannot execute a change against a fake but well-formed ticket ref.
-
-This is defense-in-depth behind the UI's search-and-select constraint (Requirement 13 R9–R11). The UI forbids manual ticket entry — an engineer must search iTop and select a real ticket — but a direct API call (curl/Postman) to the execute endpoints could still send a well-formed yet non-existent `ref` (e.g. `C-999999`). The format validation of `ChangeTicketSchema` alone does not prove the ticket exists. The service layer therefore re-verifies existence before delegating to n8n. The check applies to EXECUTE only (ADD and DELETE, both ACL and ROUTE); SHOW has no ticket and preview is display-only and side-effect free, so neither is touched.
+**User Story:** As an administrator, I want a Test n8n Connection diagnostic, so that I can confirm the integration is reachable without running a device operation.
 
 #### Acceptance Criteria
 
-1. WHEN an engineer executes an ACL or ROUTE add/delete, THE system SHALL, as the FIRST step before building the preview, calling n8n, or writing any audit row, verify that the supplied `changeTicket` exists in iTop by looking it up by `ref` (via `getTicketByRef`).
-2. IF the ticket is not found in iTop, THEN THE system SHALL reject the operation with `TICKET_NOT_FOUND` (HTTP 404) and SHALL NOT call n8n and SHALL NOT write any audit row.
-3. IF iTop is unconfigured, unreachable, or times out so the ticket cannot be verified, THEN THE system SHALL reject the operation with `ITOP_UNREACHABLE` (HTTP 503) and SHALL NOT call n8n and SHALL NOT write any audit row (block-total posture: a valid, verifiable ticket is mandatory for execution — no verification means no execution).
-4. THE check SHALL live in the service layer (`aclExecute` / `routeExecute`) as the single chokepoint, so it cannot be bypassed by a thin or alternate handler.
-5. THE rejection SHALL NOT leak SQL, stack, connection string, or any credential; a non-secret `console.warn` naming only the ticket `ref` is permitted.
-6. THE check SHALL apply to EXECUTE only; `aclShow`, `routeShow`, `aclPreview`, and `routePreview` SHALL be unchanged, and `changeTicket` SHALL remain REQUIRED on ACL/Route add and delete (Requirement 13 R9).
+1. WHEN an administrator triggers the n8n test, THE application SHALL run `pingN8n`, a `N8N_TIMEOUT_MS`-bounded GET of the n8n origin root (scheme + host), with NO API key on the wire and no webhook triggered.
+2. THE probe SHALL report an HTTP status `>= 500` as degraded (`ok: false`); only a sub-500 response SHALL count as reachable.
+3. THE `POST /api/n8n/test` endpoint SHALL require `assertSameOrigin` + `requirePermission(ADMINISTRATION_MANAGE)`, and its button SHALL be visible only when `canManage` is true (ticketing-itop and user-management specs).
+4. THE probe SHALL return a `ConnectionTestResult` `{ ok, message }` and SHALL never leak the API key.
 
 ## Non-Functional Requirements
 
 ### Security
 
 1. THE integration SHALL authenticate every call to n8n with the N8N_API_Key and SHALL prefer HTTPS for the webhook transport.
-2. THE integration SHALL never store the Execution_Credentials in cleartext; add/delete credentials are transient (not persisted), and the read-path Device_Session_Credentials are stored only AES-256-GCM-encrypted on the session row (using the existing `MFA_ENCRYPTION_KEY`), never exposed except via the owner's explicit reveal, and never written to audit or logs.
+2. THE integration SHALL never store the Execution_Credentials in cleartext; add/delete credentials are transient, and read-path Device_Session_Credentials are AES-256-GCM-encrypted on the session row (using `MFA_ENCRYPTION_KEY`), never exposed except via the owner's reveal, and never written to audit or logs.
 3. THE integration SHALL never persist or expose the N8N_API_Key or the device SSH credentials configured inside n8n.
 4. THE integration SHALL treat all n8n/device output as untrusted data.
 
 ### Reliability
 
 1. THE integration SHALL bound every n8n call with `N8N_TIMEOUT_MS`.
-2. THE integration SHALL always produce an audit log for an attempted operation, whether it succeeds or fails.
+2. THE integration SHALL always produce an audit log for an attempted operation (except a pre-execution ticket-existence rejection, which writes none — Requirement 13), whether it succeeds or fails.
 
 ### Maintainability
 
@@ -257,8 +256,8 @@ This is defense-in-depth behind the UI's search-and-select constraint (Requireme
 ## Out of Scope
 
 1. Building, hosting, or versioning the n8n workflows themselves.
-2. Storing the device SSH credentials configured inside n8n (those live in n8n; the read-path Device_Session_Credentials are a separate, encrypted, session-scoped convenience covered by Requirement 11).
-3. Persisting ACL/route configuration state as a source of truth in this application (the ACL/Route list is fetched live from n8n show). This is distinct from the `acl_logs`/`route_logs` **audit-detail** tables of Requirement 12, which record what an operation did, not device configuration state.
+2. Storing the device SSH credentials configured inside n8n (those live in n8n; the read-path Device_Session_Credentials are a separate, encrypted, session-scoped convenience — Requirement 11).
+3. Persisting ACL/route configuration state as a source of truth (the ACL/Route list is fetched live from n8n show). This is distinct from the `acl_logs`/`route_logs` audit-detail tables, which record what an operation did.
 4. Rendering and sending an executable command string to n8n (only field payloads are sent).
 5. Automatic retry/rollback of device changes beyond what Requirement 8.5 allows.
 6. Auto-filling add/delete operations from the Device_Session_Credentials (those remain per-operation).

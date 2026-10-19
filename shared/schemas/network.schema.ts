@@ -129,6 +129,38 @@ export function isValidIpv4(value: string): boolean {
 }
 
 /**
+ * ACL-ADD IP auto-correction map (single source of truth, used by the form's
+ * onblur and the server as defense-in-depth).
+ *
+ * Engineers receive tickets addressed on the `10.197.x` scheme but the device
+ * ACLs are written against the real `10.71.x` scheme. These fixed prefix
+ * mappings rewrite the FIRST THREE octets, preserving the dynamic 4th octet:
+ *   - `10.197.200.N` → `10.71.35.N`  (development env)
+ *   - `10.197.100.N` → `10.71.37.N`  (production env)
+ * Any other address is left untouched. Add entries here to extend the map.
+ */
+const ACL_IP_PREFIX_MAP: Record<string, string> = {
+  '10.197.200': '10.71.35',
+  '10.197.100': '10.71.37',
+}
+
+/**
+ * Rewrite an ACL source/destination IP per `ACL_IP_PREFIX_MAP` when it is a
+ * valid IPv4 whose first three octets match a mapped prefix; the 4th octet is
+ * kept as-is. Returns the input unchanged when it is not valid IPv4 or no prefix
+ * matches. Pure and idempotent — a value already on the `10.71.x` scheme does
+ * not match any source prefix, so re-applying is a no-op.
+ */
+export function autoCorrectAclIp(value: string): string {
+  const v = value.trim()
+  if (!isValidIpv4(v)) return value
+  const octets = v.split('.')
+  const prefix = octets.slice(0, 3).join('.')
+  const mapped = ACL_IP_PREFIX_MAP[prefix]
+  return mapped ? `${mapped}.${octets[3]}` : value
+}
+
+/**
  * Clamp a raw string to a legal partial-or-complete IPv4 / dotted-decimal mask
  * as the user types: keep only digits and dots, drop a leading dot, collapse
  * repeated dots, allow at most 4 octets, each at most 3 digits and capped at

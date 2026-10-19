@@ -2,9 +2,10 @@
 // Dark navigation sidebar for the app shell (Figma "Network ops app").
 // Dark background, light text, blue accent for the active link.
 //
-// Two-level structure: a parent item (itself a page) can own child items.
-// "ACL Policies" owns "Add ACL"; "Routes" owns "Add Route". Parents show a
-// chevron to expand/collapse their children, auto-opening on the active branch.
+// Two-level structure: a parent GROUP owns child items but is NOT a page of its
+// own — "ACL Policies" and "Routes" are empty folders whose children (Show/Add/
+// Delete) are the real pages. Clicking a parent only expands/collapses it; the
+// branch auto-opens when one of its children is the active route.
 //
 // Collapse modes:
 // - Expanded (default): full labels + chevrons + inline children.
@@ -14,7 +15,9 @@
 
 interface NavLink {
   label: string
-  to: string
+  // Target route. A parent GROUP (ACL Policies, Routes) has no `to` — it is an
+  // empty folder that only expands/collapses; its children carry the routes.
+  to?: string
   icon: string
   children?: NavLink[]
   // Permission code required to see this link. Omit = always visible
@@ -45,21 +48,24 @@ const { can } = usePermissions()
 const allLinks: NavLink[] = [
   { label: 'Dashboard', to: '/', icon: 'i-lucide-layout-dashboard' },
   {
+    // Parent is an empty folder (no `to`); the Show/Add/Delete children are the
+    // real pages. The parent still carries SHOW as its visibility gate so the
+    // whole group hides for a user without ACL access — RBAC unchanged.
     label: 'ACL Policies',
-    to: '/acl',
     icon: 'i-lucide-shield',
     permission: 'ACL_POLICIES_SHOW',
     children: [
+      { label: 'Show ACL', to: '/acl', icon: 'i-lucide-list', permission: 'ACL_POLICIES_SHOW' },
       { label: 'Add ACL', to: '/acl/add', icon: 'i-lucide-shield-plus', permission: 'ACL_POLICIES_ADD' },
       { label: 'Delete ACL', to: '/acl/delete', icon: 'i-lucide-shield-off', permission: 'ACL_POLICIES_DELETE' },
     ],
   },
   {
     label: 'Routes',
-    to: '/routes',
     icon: 'i-lucide-route',
     permission: 'ROUTES_SHOW',
     children: [
+      { label: 'Show Route', to: '/routes', icon: 'i-lucide-list', permission: 'ROUTES_SHOW' },
       { label: 'Add Route', to: '/routes/add', icon: 'i-lucide-plus', permission: 'ROUTES_ADD' },
       { label: 'Delete Route', to: '/routes/delete', icon: 'i-lucide-route-off', permission: 'ROUTES_DELETE' },
     ],
@@ -85,8 +91,10 @@ const route = useRoute()
 // Flatten to all navigable routes so we can pick a single "best match" (longest
 // matching prefix). Keeps exactly one item highlighted, e.g. /acl/add lights
 // "Add ACL", while /acl/123 lights "ACL Policies".
-const allRoutes = computed(() =>
-  links.value.flatMap(l => [l.to, ...(l.children?.map(c => c.to) ?? [])]),
+const allRoutes = computed<string[]>(() =>
+  links.value.flatMap(l =>
+    [l.to, ...(l.children?.map(c => c.to) ?? [])].filter((to): to is string => !!to),
+  ),
 )
 
 const activeTo = computed(() => {
@@ -101,11 +109,11 @@ const activeTo = computed(() => {
   return best
 })
 
-function isActive(to: string): boolean {
-  return activeTo.value === to
+function isActive(to?: string): boolean {
+  return !!to && activeTo.value === to
 }
 
-// True when a parent OR any of its children is the active route.
+// True when the parent itself (if navigable) OR any of its children is active.
 function isBranchActive(link: NavLink): boolean {
   if (isActive(link.to)) return true
   return link.children?.some(c => isActive(c.to)) ?? false
@@ -117,20 +125,20 @@ const expanded = ref<Set<string>>(new Set())
 function syncExpanded() {
   for (const link of links.value) {
     if (link.children?.length && isBranchActive(link)) {
-      expanded.value.add(link.to)
+      expanded.value.add(link.label)
     }
   }
 }
 syncExpanded()
 watch(() => route.path, syncExpanded)
 
-function toggle(to: string) {
-  if (expanded.value.has(to)) expanded.value.delete(to)
-  else expanded.value.add(to)
+function toggle(label: string) {
+  if (expanded.value.has(label)) expanded.value.delete(label)
+  else expanded.value.add(label)
 }
 
-function isExpanded(to: string): boolean {
-  return expanded.value.has(to)
+function isExpanded(label: string): boolean {
+  return expanded.value.has(label)
 }
 </script>
 
@@ -151,14 +159,30 @@ function isExpanded(to: string): boolean {
 
     <!-- ======================= RAIL (icon-only) ======================= -->
     <ul v-if="isRail" class="flex-1 space-y-1">
-      <li v-for="link in links" :key="link.to">
+      <li v-for="link in links" :key="link.label">
+        <!-- Parent group (no page): clicking its icon expands the sidebar so the
+             children become reachable. -->
+        <button
+          v-if="link.children?.length"
+          type="button"
+          :title="link.label"
+          :aria-label="`Expand ${link.label}`"
+          class="group mx-2 flex h-10 w-[calc(100%-1rem)] items-center justify-center rounded-md text-sidebar-text transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+          :class="isBranchActive(link) ? 'bg-brand text-sidebar-text' : 'hover:bg-white/5'"
+          @click="toggleCollapsed"
+        >
+          <UIcon :name="link.icon" class="shrink-0 text-lg" />
+        </button>
+
+        <!-- Plain link -->
         <NuxtLink
-          :to="link.to"
+          v-else
+          :to="link.to!"
           :title="link.label"
           :aria-label="link.label"
-          :aria-current="isBranchActive(link) ? 'page' : undefined"
+          :aria-current="isActive(link.to) ? 'page' : undefined"
           class="group mx-2 flex h-10 items-center justify-center rounded-md text-sidebar-text transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-          :class="isBranchActive(link) ? 'bg-brand text-sidebar-text' : 'hover:bg-white/5'"
+          :class="isActive(link.to) ? 'bg-brand text-sidebar-text' : 'hover:bg-white/5'"
           @click="emit('navigate')"
         >
           <UIcon :name="link.icon" class="shrink-0 text-lg" />
@@ -168,40 +192,29 @@ function isExpanded(to: string): boolean {
 
     <!-- ======================= EXPANDED (full) ======================= -->
     <ul v-else class="flex-1 space-y-1">
-      <li v-for="link in links" :key="link.to">
-        <!-- Parent with children: link row + chevron toggle -->
+      <li v-for="link in links" :key="link.label">
+        <!-- Parent GROUP (empty folder): the whole row only expands/collapses;
+             it navigates nowhere. A child being active keeps the row highlighted. -->
         <template v-if="link.children?.length">
-          <div
-            class="group mx-3 flex h-9 items-center rounded-md pr-1 text-xs font-medium text-sidebar-text transition-colors duration-150"
+          <button
+            type="button"
+            class="group mx-3 flex h-9 w-[calc(100%-1.5rem)] items-center gap-3 rounded-md px-3 pr-2 text-xs font-medium text-sidebar-text transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
             :class="isBranchActive(link) ? 'bg-brand text-sidebar-text' : 'hover:bg-white/5'"
+            :aria-label="isExpanded(link.label) ? `Collapse ${link.label}` : `Expand ${link.label}`"
+            :aria-expanded="isExpanded(link.label)"
+            @click="toggle(link.label)"
           >
-            <NuxtLink
-              :to="link.to"
-              :aria-current="isActive(link.to) ? 'page' : undefined"
-              class="flex min-w-0 flex-1 items-center gap-3 rounded-md px-3 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-              @click="emit('navigate')"
-            >
-              <UIcon :name="link.icon" class="shrink-0 text-base" />
-              <span class="truncate">{{ link.label }}</span>
-            </NuxtLink>
-
-            <button
-              type="button"
-              class="flex h-6 w-6 shrink-0 items-center justify-center rounded hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
-              :aria-label="isExpanded(link.to) ? `Collapse ${link.label}` : `Expand ${link.label}`"
-              :aria-expanded="isExpanded(link.to)"
-              @click="toggle(link.to)"
-            >
-              <UIcon
-                name="i-lucide-chevron-down"
-                class="text-sm transition-transform duration-150"
-                :class="isExpanded(link.to) ? 'rotate-180' : ''"
-              />
-            </button>
-          </div>
+            <UIcon :name="link.icon" class="shrink-0 text-base" />
+            <span class="min-w-0 flex-1 truncate text-left">{{ link.label }}</span>
+            <UIcon
+              name="i-lucide-chevron-down"
+              class="shrink-0 text-sm transition-transform duration-150"
+              :class="isExpanded(link.label) ? 'rotate-180' : ''"
+            />
+          </button>
 
           <!-- Children -->
-          <ul v-show="isExpanded(link.to)" class="mt-1 space-y-1">
+          <ul v-show="isExpanded(link.label)" class="mt-1 space-y-1">
             <li v-for="child in link.children" :key="child.to">
               <NuxtLink
                 :to="child.to"
@@ -217,10 +230,10 @@ function isExpanded(to: string): boolean {
           </ul>
         </template>
 
-        <!-- Plain link (no children) -->
+        <!-- Plain link (no children) — always has a `to`. -->
         <NuxtLink
           v-else
-          :to="link.to"
+          :to="link.to!"
           :aria-current="isActive(link.to) ? 'page' : undefined"
           class="group mx-3 flex h-9 items-center gap-3 rounded-md px-3 text-xs font-medium text-sidebar-text transition-colors duration-150 focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
           :class="isActive(link.to) ? 'bg-brand text-sidebar-text' : 'hover:bg-white/5'"

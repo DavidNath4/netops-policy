@@ -10,7 +10,9 @@ import type { AuditContext } from '../utils/audit-context'
 import { apiError } from '../utils/envelope'
 import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
+import { deriveAclTimeRange } from '#shared/schemas/acl.schema'
 import type { AclExecuteInput, AclShowInput } from '#shared/schemas/acl.schema'
+import { autoCorrectAclIp } from '#shared/schemas/network.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
 
 /**
@@ -114,53 +116,92 @@ export async function aclShow(
   return toOperationResult(correlationId, result)
 }
 
-/** Build the redacted preview for an ACL add/delete (no n8n, no audit). */
-export function aclPreview(input: AclExecuteInput): CommandPreview {
-  return buildAclPreview(input)
+/**
+ * Defense-in-depth IP auto-correction for ACL ADD. The form already rewrites
+ * ticket IPs (10.197.x → the real 10.71.x scheme) on blur, but a direct API call
+ * could bypass the UI, so the server re-applies the SAME mapping before preview,
+ * audit, and the n8n call. Only ADD is corrected; DELETE is left as submitted.
+ * Returns a new input object with corrected source/destination; non-matching or
+ * invalid addresses are unchanged (the mapping is a no-op for them).
+ */
+function withCorrectedAclIps(input: AclExecuteInput): AclExecuteInput {
+  if (input.operation !== 'ADD') return input
+  return {
+    ...input,
+    source: autoCorrectAclIp(input.source),
+    destination: autoCorrectAclIp(input.destination),
+  }
 }
 
-/** ACL EXECUTE — confirmed add/delete, delegated to n8n, one audit log. */
-export async function aclExecute(
+/** Build the redacted preview for an ACL add/delete (no n8n, no audit). */
+export function aclPreview(input: AclExecuteInput): CommandPreview {
+  return buildAclPreview(withCorrectedAclIps(input))
+}
+
+/**
+ * Swap source<->destination and sourceMask<->destinationMask for the reverse
+ * direction of a bidirectional ACL ADD. Everything else (change ticket, time
+ * range, exec credentials) is kept; `bidirectional` is dropped so the reverse
+ * direction renders/executes as an ordinary one-way ADD. IPs are assumed
+ * already corrected by the caller (correct first, then swap).
+ */
+function reverseAclDirection(input: AclExecuteInput): AclExecuteInput {
+  if (input.operation !== 'ADD') return input
+  return {
+    ...input,
+    bidirectional: false,
+    source: input.destination,
+    sourceMask: input.destinationMask,
+    destination: input.source,
+    destinationMask: input.sourceMask,
+  }
+}
+
+/**
+ * Run ONE ACL direction end-to-end: new correlation id → redacted preview →
+ * n8n call (unchanged { user, pass, source, destination } contract, plus the
+ * optional time-range keys) → one master audit row + one acl_logs detail row,
+ * written atomically → client-facing result. A bidirectional ADD calls this
+ * twice (forward then reverse), each independent with its own id and audit row.
+ */
+async function runAclDirection(
   db: Database,
   ctx: AuditContext,
   input: AclExecuteInput,
 ): Promise<OperationResult> {
-  // Security guard: the UI forbids manual ticket entry (search + select only),
-  // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
-  // the change ticket actually exists in iTop before executing. Block-total: if
-  // iTop cannot verify (unreachable/unconfigured), reject rather than execute.
-  const ticketRef = input.changeTicket
-  try {
-    const ticket = await getTicketByRef(ticketRef)
-    if (ticket === null) {
-      console.warn(`[acl] execute rejected: change ticket ${ticketRef} not found in iTop`)
-      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
-    }
-  }
-  catch (err) {
-    if (err instanceof ItopUnreachableError) {
-      console.warn(`[acl] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
-      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
-    }
-    throw err
-  }
-
   const correlationId = randomUUID()
-  const preview = buildAclPreview(input)
+  // Per-direction preview must show ONLY this direction's command lines; the
+  // bidirectional two-direction preview is assembled upstream (aclPreview on
+  // the full input). Clear the flag so buildAclPreview renders one direction.
+  const preview = buildAclPreview(
+    input.operation === 'ADD' ? { ...input, bidirectional: false } : input,
+  )
 
   // n8n acl/add & acl/delete contract: { user, pass, source, destination },
   // where source/destination are joined "IP MASK" strings. A missing mask
   // defaults to a /32 host mask (255.255.255.255).
+  const body: Record<string, string> = {
+    user: input.execUsername,
+    pass: input.execPassword,
+    source: joinAddr(input.source, 'sourceMask' in input ? input.sourceMask : undefined),
+    destination: joinAddr(input.destination, 'destinationMask' in input ? input.destinationMask : undefined),
+  }
+
+  // Optional time-range ADD: when the ADD carries a time range, append the three
+  // exact keys (objectName, time, date) AS ONE UNIT. n8n detects a time-range
+  // add by their presence; absence means an ordinary add. DELETE never gets them.
+  if (input.operation === 'ADD' && input.timeRange) {
+    const { objectName, time, date } = deriveAclTimeRange(input.timeRange)
+    body.objectName = objectName
+    body.time = time
+    body.date = date
+  }
+
   const result = await callN8n({
     module: 'ACL',
     action: input.operation,
     correlationId,
-    body: {
-      user: input.execUsername,
-      pass: input.execPassword,
-      source: joinAddr(input.source, 'sourceMask' in input ? input.sourceMask : undefined),
-      destination: joinAddr(input.destination, 'destinationMask' in input ? input.destinationMask : undefined),
-    },
+    body,
   })
 
   // Master audit row + acl_logs detail row, written atomically.
@@ -211,4 +252,60 @@ export async function aclExecute(
   )
 
   return toOperationResult(correlationId, result)
+}
+
+/**
+ * ACL EXECUTE — confirmed add/delete, delegated to n8n. A one-way operation runs
+ * once (one audit row). A bidirectional ACL ADD runs TWICE via runAclDirection:
+ * the forward direction then the reverse (source/destination + masks swapped),
+ * each an independent n8n call with its own correlation id and its own audit
+ * row. Both directions run regardless of the other's outcome (no rollback); the
+ * combined result returns the forward direction at the top level with the
+ * reverse nested under `reverse`. The iTop change-ticket guard runs ONCE up
+ * front (both directions share the same ticket).
+ */
+export async function aclExecute(
+  db: Database,
+  ctx: AuditContext,
+  rawInput: AclExecuteInput,
+): Promise<OperationResult> {
+  // Defense-in-depth: apply the ACL-ADD IP auto-correction server-side so a
+  // direct API call (bypassing the form's on-blur fix) still executes, audits,
+  // and previews the corrected 10.71.x address. From here ONLY the corrected
+  // `input` is used, so nothing records an un-mapped-but-mappable IP. (Correct
+  // first, then swap for the reverse direction.)
+  const input = withCorrectedAclIps(rawInput)
+
+  // Security guard: the UI forbids manual ticket entry (search + select only),
+  // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
+  // the change ticket actually exists in iTop before executing. Run ONCE — both
+  // directions of a bidirectional ADD share the same ticket. Block-total: if
+  // iTop cannot verify (unreachable/unconfigured), reject rather than execute.
+  const ticketRef = input.changeTicket
+  try {
+    const ticket = await getTicketByRef(ticketRef)
+    if (ticket === null) {
+      console.warn(`[acl] execute rejected: change ticket ${ticketRef} not found in iTop`)
+      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
+    }
+  }
+  catch (err) {
+    if (err instanceof ItopUnreachableError) {
+      console.warn(`[acl] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
+      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
+    }
+    throw err
+  }
+
+  // Bidirectional ACL ADD: run the forward direction, then the reverse
+  // (swapped) direction, BOTH regardless of each other's outcome. Each is a
+  // self-contained n8n call + audit row via runAclDirection.
+  if (input.operation === 'ADD' && input.bidirectional) {
+    const forward = await runAclDirection(db, ctx, input)
+    const reverse = await runAclDirection(db, ctx, reverseAclDirection(input))
+    return { ...forward, reverse }
+  }
+
+  // One-way ACL add/delete (or ADD with bidirectional off): a single call.
+  return runAclDirection(db, ctx, input)
 }
