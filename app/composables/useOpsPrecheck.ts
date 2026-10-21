@@ -31,6 +31,35 @@ export function findAclMatch(items: unknown[], source: string, destination: stri
   })
 }
 
+/**
+ * Extract the time-range object name from a rendered ACL command, if any. The
+ * device renders a time-bound rule as `... time-range <name>` at the END of the
+ * line (confirmed against live `acl/show` output), so the object name is the
+ * token following the last `time-range`. Returns null when the command has no
+ * time range (an ordinary rule).
+ */
+export function timeRangeNameFromRaw(raw: string | undefined | null): string | null {
+  if (!raw) return null
+  const m = raw.match(/\btime-range\s+(\S+)\s*$/)
+  return m ? m[1]! : null
+}
+
+/**
+ * Find the matched ACL row (source+destination pair) and return the time-range
+ * object name it references, or null when the rule is matched but has no time
+ * range, or when no row matches at all.
+ */
+export function aclTimeRangeFromItems(items: unknown[], source: string, destination: string): string | null {
+  const s = source.trim()
+  const d = destination.trim()
+  const row = (items as AclRow[]).find((r) => {
+    const rs = r.source?.value?.trim()
+    const rd = r.destination?.value?.trim()
+    return rs === s && rd === d
+  })
+  return row ? timeRangeNameFromRaw(row.raw) : null
+}
+
 /** True if a route row matches the given route IP (its destination). */
 export function findRouteMatch(items: unknown[], routeIp: string): boolean {
   const ip = routeIp.trim()
@@ -43,23 +72,52 @@ export function useOpsPrecheck() {
   /**
    * ACL existence check. Searches by the source IP (acl/show takes one search
    * value), then matches the source+destination pair in the returned rows.
-   * Returns { exists } or throws the underlying API error (e.g. creds required).
+   * `creds` (optional) are the device credentials typed on the calling page; when
+   * passed, the lookup runs as that engineer instead of using the Device Session
+   * Credentials. Returns { exists } or throws the underlying API error.
    */
-  async function aclExists(source: string, destination: string): Promise<boolean> {
-    const result = await api.aclOps.show(source.trim())
+  async function aclExists(
+    source: string,
+    destination: string,
+    creds?: { execUsername: string, execPassword: string },
+  ): Promise<boolean> {
+    const result = await api.aclOps.show(source.trim(), creds)
     const items = (result.items as unknown[] | null) ?? []
     return findAclMatch(items, source, destination)
   }
 
   /**
-   * Route existence check. route/show is show-all, so fetch the table and match
-   * the route IP against each row's destination.
+   * ACL match detail for the DELETE flow: one `acl/show` call returning both
+   * whether the source→destination rule exists AND the time-range object it
+   * references (null when none). Lets the delete page decide, in a single
+   * lookup, whether to run the time-range usage check.
    */
-  async function routeExists(routeIp: string): Promise<boolean> {
-    const result = await api.routeOps.show('')
+  async function aclMatchDetail(
+    source: string,
+    destination: string,
+    creds?: { execUsername: string, execPassword: string },
+  ): Promise<{ exists: boolean, timeRange: string | null }> {
+    const result = await api.aclOps.show(source.trim(), creds)
+    const items = (result.items as unknown[] | null) ?? []
+    return {
+      exists: findAclMatch(items, source, destination),
+      timeRange: aclTimeRangeFromItems(items, source, destination),
+    }
+  }
+
+  /**
+   * Route existence check. route/show is show-all, so fetch the table and match
+   * the route IP against each row's destination. `creds` (optional) behave as in
+   * aclExists.
+   */
+  async function routeExists(
+    routeIp: string,
+    creds?: { execUsername: string, execPassword: string },
+  ): Promise<boolean> {
+    const result = await api.routeOps.show('', creds)
     const items = (result.items as unknown[] | null) ?? []
     return findRouteMatch(items, routeIp)
   }
 
-  return { aclExists, routeExists }
+  return { aclExists, aclMatchDetail, routeExists }
 }

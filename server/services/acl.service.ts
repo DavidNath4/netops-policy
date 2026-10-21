@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { Database } from '~~/database'
 import { getTicketByRef, ItopUnreachableError } from '../network/itop-client'
-import { callN8n } from '../network/n8n-client'
+import { callN8n, checkTimeRangeUsage, fetchTimeRanges } from '../network/n8n-client'
 import { buildAclPreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
 import { insertAclLog } from '../repositories/acl-log.repository'
@@ -14,6 +14,7 @@ import { deriveAclTimeRange } from '#shared/schemas/acl.schema'
 import type { AclExecuteInput, AclShowInput } from '#shared/schemas/acl.schema'
 import { autoCorrectAclIp } from '#shared/schemas/network.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
+import type { TimeRangeList, TimeRangeUsageCheckInput, TimeRangeUsageList } from '#shared/schemas/time-range.schema'
 
 /**
  * ACL operations: show (read-only), preview (redacted, display-only), and
@@ -22,6 +23,104 @@ import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
  * one audit log per show/execute. It never stores ACL rows and never runs a
  * device command itself.
  */
+
+/**
+ * Structured ACL row shape returned by n8n `acl/show` (normalized to
+ * `result.items` by `callN8n`). Each endpoint is a `{ type?, value? }` object;
+ * the live contract is `{ success, total, data[], message }` with `data[]`
+ * mapped to `items`. A row may ALSO arrive as a raw Cisco command string (or an
+ * object exposing a `.raw` string) — see `aclPairExists` for the fallback.
+ */
+interface AclShowEndpoint { type?: string, value?: string }
+interface AclShowRow { raw?: string, source?: AclShowEndpoint, destination?: AclShowEndpoint }
+
+/**
+ * Parse the source/destination IP pair out of a raw Cisco ASA access-list line,
+ * e.g. `access-list KSEI-JMP extended permit ip host A host B` or
+ * `... permit ip A.B.C.D <mask> host B` (network form). Returns the two bare
+ * endpoint IPs in order after the protocol token; `host X` → X, `X <mask>` → X
+ * (mask dropped — pair match ignores mask). `object`/`object-group`/`any`
+ * endpoints are NOT concrete IPv4 and yield `null` for that endpoint, so they
+ * can never equal a bare IPv4 source/destination (the ADD form only ever
+ * supplies concrete IPv4s). A trailing `time-range <name>` and any `eq <port>`
+ * are ignored. Returns null when the line cannot be parsed into two endpoints.
+ */
+function parseAclPairFromRaw(raw: string): { source: string | null, destination: string | null } | null {
+  // Tokenize after the `permit`/`deny` + protocol token. Strip a trailing
+  // `time-range <name>` first so it is never mistaken for an endpoint.
+  const line = raw.trim().replace(/\s+time-range\s+\S+\s*$/, '')
+  const m = line.match(/\b(?:permit|deny)\s+\S+\s+(.*)$/)
+  if (!m) return null
+  const tokens = m[1]!.trim().split(/\s+/)
+
+  // Consume one endpoint from the front of `tokens`, returning its bare IP (or
+  // null for a non-IP endpoint) and the number of tokens consumed.
+  function takeEndpoint(toks: string[]): { ip: string | null, used: number } | null {
+    if (toks.length === 0) return null
+    const t = toks[0]!
+    if (t === 'host') {
+      // `host A` → the address A.
+      return toks.length >= 2 ? { ip: toks[1]!, used: 2 } : null
+    }
+    if (t === 'object' || t === 'object-group') {
+      // `object NAME` / `object-group NAME` → not a concrete IPv4 → never matches.
+      return toks.length >= 2 ? { ip: null, used: 2 } : null
+    }
+    if (t === 'any') {
+      // `any` → not a concrete IPv4 → never matches.
+      return { ip: null, used: 1 }
+    }
+    // Network form `A.B.C.D <mask>` → the address A.B.C.D (mask dropped). A lone
+    // address with no mask is still taken as the address.
+    const next = toks[1]
+    if (next && /^\d{1,3}(?:\.\d{1,3}){3}$/.test(next)) {
+      return { ip: t, used: 2 }
+    }
+    return { ip: t, used: 1 }
+  }
+
+  const first = takeEndpoint(tokens)
+  if (!first) return null
+  const second = takeEndpoint(tokens.slice(first.used))
+  if (!second) return null
+  return { source: first.ip, destination: second.ip }
+}
+
+/**
+ * True if any ACL row matches the given source→destination IP PAIR (IP only;
+ * mask, port, and time-range are ignored). Duplicates the client
+ * `findAclMatch` semantics on purpose — the server must NOT import client
+ * composables. The live n8n `acl/show` shape is structured `data[]` rows with
+ * `source.value`/`destination.value`; a raw command-string row (or a row with a
+ * `.raw` string) is parsed as a fallback. Exported so it can be unit-tested
+ * without standing up n8n mocks.
+ */
+export function aclPairExists(items: unknown[], source: string, destination: string): boolean {
+  const s = source.trim()
+  const d = destination.trim()
+  return (items as (AclShowRow | string)[]).some((row) => {
+    // (a) Structured row: compare the trimmed source/destination values.
+    if (row && typeof row === 'object') {
+      const rs = row.source?.value?.trim()
+      const rd = row.destination?.value?.trim()
+      if (rs !== undefined || rd !== undefined) {
+        if (rs === s && rd === d) return true
+      }
+      // (b) Fallback: the row carries a raw command string.
+      if (typeof row.raw === 'string') {
+        const pair = parseAclPairFromRaw(row.raw)
+        if (pair && pair.source === s && pair.destination === d) return true
+      }
+      return false
+    }
+    // (b) Fallback: the row IS a raw command string.
+    if (typeof row === 'string') {
+      const pair = parseAclPairFromRaw(row)
+      return !!pair && pair.source === s && pair.destination === d
+    }
+    return false
+  })
+}
 
 /**
  * Join an address and its mask into the single "IP MASK" string n8n expects.
@@ -45,6 +144,34 @@ function toOperationResult(correlationId: string, r: N8nResult): OperationResult
     output: r.output ?? null,
     error: r.error ?? null,
   }
+}
+
+/**
+ * List the device's existing time-range OBJECTS for the ACL Add "Select
+ * Existing" dropdown. Read-only: delegates to the n8n `fetchTimeRanges` helper,
+ * which NEVER throws — on any failure it yields an empty list, so the handler
+ * still returns 200 and the page falls back to "Create New". No audit row (a
+ * passive catalog fetch, not an ACL operation).
+ */
+export async function listAclTimeRanges(): Promise<TimeRangeList> {
+  const res = await fetchTimeRanges()
+  return { objects: res.objects }
+}
+
+/**
+ * Check whether the given time-range object(s) are still used by any ACL rule,
+ * for the ACL DELETE "Generate" advisory warning. Read-only: delegates to the
+ * n8n `checkTimeRangeUsage` helper, which NEVER throws — on any failure it
+ * yields an empty list, so the delete flow proceeds without the warning. No
+ * audit row (a passive usage probe, not an ACL operation). Credentials come
+ * from the delete page and are never persisted or logged.
+ */
+export async function checkAclTimeRangeUsage(input: TimeRangeUsageCheckInput): Promise<TimeRangeUsageList> {
+  const res = await checkTimeRangeUsage(input.objectNames, {
+    username: input.execUsername,
+    password: input.execPassword,
+  })
+  return { usages: res.usages }
 }
 
 /**
@@ -187,14 +314,21 @@ async function runAclDirection(
     destination: joinAddr(input.destination, 'destinationMask' in input ? input.destinationMask : undefined),
   }
 
-  // Optional time-range ADD: when the ADD carries a time range, append the three
-  // exact keys (objectName, time, date) AS ONE UNIT. n8n detects a time-range
-  // add by their presence; absence means an ordinary add. DELETE never gets them.
+  // Optional time-range ADD, two modes (n8n detects a time-range add by the
+  // presence of these keys; absence means an ordinary add; DELETE never gets them):
+  // - existing: reference an on-device object by name only — ONLY `objectName`,
+  //             NO `date`/`time` keys (n8n reuses the already-defined object).
+  // - new:      derive the three exact keys (objectName, time, date) AS ONE UNIT.
   if (input.operation === 'ADD' && input.timeRange) {
-    const { objectName, time, date } = deriveAclTimeRange(input.timeRange)
-    body.objectName = objectName
-    body.time = time
-    body.date = date
+    if (input.timeRange.mode === 'existing') {
+      body.objectName = input.timeRange.objectName
+    }
+    else {
+      const { objectName, time, date } = deriveAclTimeRange(input.timeRange)
+      body.objectName = objectName
+      body.time = time
+      body.date = date
+    }
   }
 
   const result = await callN8n({
@@ -295,6 +429,80 @@ export async function aclExecute(
       throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
     }
     throw err
+  }
+
+  // Defense-in-depth ADD guards (mirror app/pages/acl/add.vue). The UI blocks
+  // these three cases before they reach the server, but a direct API call could
+  // bypass the form, so re-enforce them here. ADD ONLY — DELETE is never
+  // guarded and falls straight through to the branch below.
+  if (input.operation === 'ADD') {
+    // GUARD 1 — same endpoint (pure, no n8n call): Source and Destination may
+    // not resolve to the SAME IPv4. Compare the already-corrected bare IPs
+    // (masks are carried separately). For a bidirectional ADD this single check
+    // covers both directions — swapping two equal values is still equal.
+    if (input.source.trim() === input.destination.trim()) {
+      throw apiError(400, 'ACL_SAME_ENDPOINT', 'Source dan Destination tidak boleh menggunakan IP yang sama.')
+    }
+
+    // GUARDS 2 & 3 — existence pre-check (IP PAIR ALONE; mask and time range
+    // ignored). Covers "same IP, different time range" AND "same IP, different
+    // subnet/mask". READ-ONLY: this writes NO audit row (it does NOT route
+    // through recordWithDetail); only the real execute (runAclDirection) audits.
+    //
+    // Fail-closed (HARD gate, same posture as the iTop ticket guard above):
+    // unlike the never-throw advisory helpers for DELETE warnings
+    // (fetchTimeRanges / checkTimeRangeUsage, which degrade to empty lists),
+    // this guard REJECTS when the pre-check cannot produce a usable item list,
+    // rather than silently allowing an unverifiable add. callN8n never throws,
+    // but the call is wrapped in try/catch so any unexpected throw also fails
+    // closed.
+    const aclShowItems = async (searchIp: string): Promise<unknown[]> => {
+      const result = await callN8n({
+        module: 'ACL',
+        action: 'SHOW',
+        correlationId: randomUUID(),
+        // Per-request exec credentials from the ADD input (execute path, NOT
+        // DeviceCredentials). callN8n never logs user/pass or the API key.
+        body: { user: input.execUsername, pass: input.execPassword, source: searchIp },
+      })
+      if (result.status === 'FAILED' || !Array.isArray(result.items)) {
+        throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+      }
+      return result.items
+    }
+
+    let alreadyExists: boolean
+    try {
+      if (input.bidirectional) {
+        // Bidirectional ADD: check BOTH directions and block if EITHER exists.
+        // Each acl/show searches by a single source IP, so two calls are needed
+        // (forward source→destination, reverse destination→source). DECISION:
+        // the client's partial-add "skip one direction" UX is a UI convenience;
+        // the server guard is a safety net and must REJECT rather than silently
+        // half-execute, so any existing direction blocks the whole ADD.
+        const forwardItems = await aclShowItems(input.source.trim())
+        const reverseItems = await aclShowItems(input.destination.trim())
+        alreadyExists
+          = aclPairExists(forwardItems, input.source, input.destination)
+            || aclPairExists(reverseItems, input.destination, input.source)
+      }
+      else {
+        // One-way ADD: check the forward pair only.
+        const items = await aclShowItems(input.source.trim())
+        alreadyExists = aclPairExists(items, input.source, input.destination)
+      }
+    }
+    catch {
+      // Any throw from the pre-check (our own fail-closed apiError, or an
+      // unexpected error — callN8n itself never throws) is a CLOSED gate: never
+      // fall through to execute on an unverifiable pre-check. Re-raise as the
+      // single 503 so the un-available posture is consistent.
+      throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+    }
+
+    if (alreadyExists) {
+      throw apiError(409, 'ACL_ALREADY_EXISTS', 'ACL untuk Source -> Destination ini sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.')
+    }
   }
 
   // Bidirectional ACL ADD: run the forward direction, then the reverse

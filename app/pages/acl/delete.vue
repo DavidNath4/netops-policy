@@ -12,6 +12,11 @@ definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_DELETE' })
 
 const api = useApi()
 
+// When the ACL being deleted references a time-range object that is STILL used
+// by OTHER ACL rules, this holds those other rules' raw commands so the UI can
+// show an advisory (non-blocking) warning. Empty/null = no warning.
+const timeRangeUsageWarning = ref<{ objectName: string, commands: string[] } | null>(null)
+
 const form = reactive({
   source: '',
   sourceMask: '',
@@ -48,12 +53,25 @@ function buildPayload(): AclPreviewInput {
 }
 
 const preview = ref<string | null>(null)
-const { aclExists } = useOpsPrecheck()
+const { aclMatchDetail } = useOpsPrecheck()
 
 const generating = ref(false)
 const executing = ref(false)
 const confirmOpen = ref(false)
 const result = ref<OperationResult | null>(null)
+
+// The "source → destination" IP (+ optional mask) line processed by the last
+// execute, captured BEFORE resetFields() wipes the form so the result pop-up can
+// show exactly what was deleted even when the device returns no output. DELETE is
+// never auto-corrected (that is ADD-only), so the raw inputs are shown as typed.
+const resultDirection = ref<string | null>(null)
+
+/** Format an "IP mask" endpoint (mask omitted when blank). */
+function fmtEndpoint(ip: string, mask: string): string {
+  const i = ip.trim()
+  const m = mask.trim()
+  return m ? `${i} ${m}` : i
+}
 
 // Single result/alert pop-up driving ResultDialog; replaces the two in-page
 // UAlert (error/warning) blocks. `showDialog` opens it with a variant + copy.
@@ -78,15 +96,46 @@ function toMessage(e: unknown, fallback: string): string {
   return e instanceof Error ? e.message : fallback
 }
 
-// Invalidate a stale preview whenever the form changes.
+// Invalidate a stale preview (and any usage warning) whenever the form changes.
 watch(form, () => {
   preview.value = null
   result.value = null
+  resultDirection.value = null
+  timeRangeUsageWarning.value = null
 })
+
+// Normalize a command/address for loose comparison: collapse whitespace, drop a
+// trailing `time-range <name>` clause, and lowercase. Used to decide which of
+// the usage `raw_commands` are the ACL we're ABOUT to delete (so we can exclude
+// it and only warn about OTHER rules still using the same object).
+function normalizeRule(text: string): string {
+  return text
+    .replace(/\btime-range\s+\S+\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
+}
+
+// Do the forward/reverse directions of the ACL being deleted (host IPs only,
+// masks ignored for this loose match) appear in a given raw command? If so, that
+// command IS the rule we're deleting and must be excluded from the warning.
+function isSelfRule(rawCommand: string, source: string, destination: string): boolean {
+  const n = normalizeRule(rawCommand)
+  const s = source.trim().toLowerCase()
+  const d = destination.trim().toLowerCase()
+  if (!s || !d) return false
+  return n.includes(s) && n.includes(d)
+}
 
 // Block submit on malformed IPs (defense-in-depth; the server re-validates too).
 const ipsValid = computed(() =>
   isValidIpv4(form.source) && isValidIpv4(form.destination),
+)
+
+// Generate runs an n8n pre-check (acl/show) that now authenticates with the
+// credentials typed on THIS page, so both must be filled before Generate.
+const credsFilled = computed(() =>
+  form.execUsername.trim() !== '' && form.execPassword !== '',
 )
 
 async function onGenerate() {
@@ -97,12 +146,37 @@ async function onGenerate() {
   }
   generating.value = true
   try {
-    // Pre-check: a DELETE must already exist. Look it up first.
-    const exists = await aclExists(form.source, form.destination)
+    const creds = { execUsername: form.execUsername, execPassword: form.execPassword }
+    // Pre-check: a DELETE must already exist. One acl/show returns BOTH whether
+    // the rule exists and the time-range object it references (if any).
+    const { exists, timeRange } = await aclMatchDetail(form.source, form.destination, creds)
     if (!exists) {
       showDialog('warning', 'Nothing to delete', 'This ACL (source → destination) does not exist. Nothing to delete.')
       return
     }
+
+    // If the matched rule carries a time-range object, check whether that object
+    // is still used by OTHER rules. Advisory only — it never blocks the delete.
+    if (timeRange) {
+      try {
+        const { usages } = await api.aclOps.timeRangeUsage([timeRange], creds)
+        const usage = usages.find(u => u.name === timeRange) ?? usages[0]
+        if (usage?.isUsed) {
+          // Exclude the rule we're about to delete (both directions) so only
+          // OTHER users of the same object remain.
+          const others = usage.rawCommands.filter(
+            cmd => !isSelfRule(cmd, form.source, form.destination),
+          )
+          if (others.length > 0) {
+            timeRangeUsageWarning.value = { objectName: timeRange, commands: others }
+          }
+        }
+      }
+      catch {
+        // Usage check is best-effort; never block the preview on its failure.
+      }
+    }
+
     const { preview: text } = await api.aclOps.preview(buildPayload())
     preview.value = text
   }
@@ -124,6 +198,7 @@ function resetFields() {
   form.execUsername = ''
   form.execPassword = ''
   selectedTicket.value = null
+  timeRangeUsageWarning.value = null
 }
 
 async function onExecuteConfirmed() {
@@ -131,6 +206,10 @@ async function onExecuteConfirmed() {
   try {
     const res = await api.aclOps.execute(buildPayload())
     confirmOpen.value = false
+    // Capture the deleted IP pair BEFORE the form is reset, so the pop-up shows
+    // the exact "source → destination" that ran even when the device returns no
+    // output (mirrors the Add ACL result line).
+    const directionLine = `${fmtEndpoint(form.source, form.sourceMask)} → ${fmtEndpoint(form.destination, form.destinationMask)}`
     // On success, clear the form fields. The form watcher wipes `result`/`preview`
     // when the fields change, so re-assign `result` after the reset settles to
     // keep the success/failure output visible on an emptied form.
@@ -139,6 +218,7 @@ async function onExecuteConfirmed() {
       await nextTick()
     }
     result.value = res
+    resultDirection.value = directionLine
     showDialog(
       res.status === 'SUCCESS' ? 'success' : 'error',
       res.status === 'SUCCESS' ? 'Execution succeeded' : 'Execution failed',
@@ -274,6 +354,30 @@ const inputClass
 
       <ItopTicketModal v-model="ticketModalOpen" @selected="onTicketSelected" />
 
+      <!-- Advisory warning: the time-range object on the ACL being deleted is
+           still used by OTHER rules. Informational only — it never blocks the
+           delete; it lists the device commands that still reference the object
+           so the engineer can decide. -->
+      <div
+        v-if="timeRangeUsageWarning"
+        class="flex flex-col gap-2 rounded-lg border border-amber-300 bg-amber-50 p-4"
+        role="alert"
+      >
+        <div class="flex items-start gap-2">
+          <UIcon name="i-lucide-triangle-alert" class="mt-0.5 size-4 shrink-0 text-amber-500" />
+          <p class="text-[13px] text-amber-700">
+            The time range <span class="font-mono font-semibold">{{ timeRangeUsageWarning.objectName }}</span>
+            on this ACL is still used by {{ timeRangeUsageWarning.commands.length }} other
+            rule{{ timeRangeUsageWarning.commands.length === 1 ? '' : 's' }}. Deleting this ACL
+            will not remove those rules, but they share the same time-range object. Review them
+            before you continue — you can still proceed.
+          </p>
+        </div>
+        <div class="max-h-48 overflow-y-auto rounded-md border border-amber-200 bg-panel p-3">
+          <pre class="whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-ink">{{ timeRangeUsageWarning.commands.join('\n') }}</pre>
+        </div>
+      </div>
+
       <!-- Generated command preview + primary action -->
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold text-ink">Generated Command</h2>
@@ -286,7 +390,7 @@ const inputClass
           <button
             v-if="!preview"
             type="submit"
-            :disabled="generating || !ipsValid || !form.changeTicket"
+            :disabled="generating || !credsFilled || !ipsValid || !form.changeTicket"
             class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
           >
             <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />
@@ -323,7 +427,11 @@ const inputClass
       :message="dialog.message"
     >
       <template v-if="result" #body>
+        <!-- The "source → destination" IP (+ mask) pair that was deleted, shown
+             even when the device returns no output, followed by any device
+             output/error. Mirrors the Add ACL result line. -->
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+          <pre v-if="resultDirection" class="whitespace-pre-wrap break-all text-terminal-text">{{ resultDirection }}</pre>
           <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
           <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
         </div>

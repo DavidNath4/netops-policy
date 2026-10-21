@@ -15,6 +15,14 @@ import { ChangeTicketSchema, MaskSchema } from './network.schema'
  */
 export const RouteShowSchema = z.object({
   search: z.string().trim().max(256).optional(),
+  // Optional per-request device credentials. The Route Add/Delete "Generate"
+  // pre-check sends the credentials typed ON THAT page so the lookup runs as
+  // that engineer. When BOTH are present the server uses them; otherwise it
+  // falls back to the caller's Device Session Credentials (the routes list
+  // page, which has no credential inputs, relies on that fallback). Never
+  // persisted.
+  execUsername: z.string().trim().min(1).max(128).optional(),
+  execPassword: z.string().min(1).max(256).optional(),
 })
 export type RouteShowInput = z.infer<typeof RouteShowSchema>
 

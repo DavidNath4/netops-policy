@@ -11,7 +11,7 @@ const props = withDefaults(defineProps<{
   /** Visual variant — selects the header icon + accent colour. */
   variant: 'success' | 'error' | 'warning'
   /** Primary message shown beside the variant icon. */
-  message: string
+  message?: string
 }>(), {
   message: '',
 })

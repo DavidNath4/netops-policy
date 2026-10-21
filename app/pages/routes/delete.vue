@@ -78,6 +78,12 @@ watch(form, () => {
 // Block submit on a malformed route IP (server re-validates too).
 const ipValid = computed(() => isValidIpv4(form.routeIp))
 
+// Generate runs an n8n pre-check (route/show) that now authenticates with the
+// credentials typed on THIS page, so both must be filled before Generate.
+const credsFilled = computed(() =>
+  form.execUsername.trim() !== '' && form.execPassword !== '',
+)
+
 async function onGenerate() {
   result.value = null
   if (!ipValid.value) {
@@ -86,8 +92,11 @@ async function onGenerate() {
   }
   generating.value = true
   try {
-    // Pre-check: a DELETE must already exist.
-    const exists = await routeExists(form.routeIp)
+    // Pre-check: a DELETE must already exist. Look it up as this engineer.
+    const exists = await routeExists(form.routeIp, {
+      execUsername: form.execUsername,
+      execPassword: form.execPassword,
+    })
     if (!exists) {
       showDialog('warning', 'Nothing to delete', 'No route for this IP exists. Nothing to delete.')
       return
@@ -259,7 +268,7 @@ const inputClass
           <button
             v-if="!preview"
             type="submit"
-            :disabled="generating || !ipValid || !form.changeTicket"
+            :disabled="generating || !credsFilled || !ipValid || !form.changeTicket"
             class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
           >
             <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />

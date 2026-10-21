@@ -14,6 +14,7 @@ import type {
   UpdateUserInput,
 } from '~/utils/api-types'
 import type { AclExecuteInput, AclPreviewInput } from '#shared/schemas/acl.schema'
+import type { TimeRangeList, TimeRangeUsageList } from '#shared/schemas/time-range.schema'
 import type { RouteExecuteInput, RoutePreviewInput } from '#shared/schemas/route.schema'
 import type { DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8n.schema'
 import type { AuditResponse } from '#shared/schemas/audit.schema'
@@ -104,8 +105,11 @@ export function useApi() {
 
     // ACL operations via n8n (search/preview/execute).
     aclOps: {
-      show(search: string): Promise<OperationResult> {
-        return apiSend<OperationResult>('/api/acl/show', 'POST', { search })
+      // `creds` (optional) are the device credentials typed on the calling page;
+      // when passed, the pre-check runs as that engineer instead of using the
+      // Device Session Credentials. The search page omits them.
+      show(search: string, creds?: { execUsername: string, execPassword: string }): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/acl/show', 'POST', { search, ...creds })
       },
       preview(input: AclPreviewInput): Promise<{ preview: string, command: string[] }> {
         return apiSend<{ preview: string, command: string[] }>('/api/acl/preview', 'POST', input)
@@ -113,12 +117,28 @@ export function useApi() {
       execute(input: AclExecuteInput): Promise<OperationResult> {
         return apiSend<OperationResult>('/api/acl/execute', 'POST', input)
       },
+      // Existing on-device time-range objects for the Add page "Select Existing".
+      timeRanges(): Promise<TimeRangeList> {
+        return apiGet<TimeRangeList>('/api/acl/time-ranges')
+      },
+      // Check (for the DELETE flow) whether the given time-range object(s) are
+      // still used by other ACL rules. `creds` are the device credentials typed
+      // on the delete page. Never throws server-side — empty `usages` on failure.
+      timeRangeUsage(
+        objectNames: string[],
+        creds: { execUsername: string, execPassword: string },
+      ): Promise<TimeRangeUsageList> {
+        return apiSend<TimeRangeUsageList>('/api/acl/time-range-usage', 'POST', { objectNames, ...creds })
+      },
     },
 
     // Route operations via n8n (search/preview/execute).
     routeOps: {
-      show(search: string): Promise<OperationResult> {
-        return apiSend<OperationResult>('/api/route/show', 'POST', { search })
+      // `creds` (optional) are the device credentials typed on the calling page;
+      // when passed, the pre-check runs as that engineer instead of using the
+      // Device Session Credentials. The routes list page omits them.
+      show(search: string, creds?: { execUsername: string, execPassword: string }): Promise<OperationResult> {
+        return apiSend<OperationResult>('/api/route/show', 'POST', { search, ...creds })
       },
       preview(input: RoutePreviewInput): Promise<{ preview: string, command: string[] }> {
         return apiSend<{ preview: string, command: string[] }>('/api/route/preview', 'POST', input)
@@ -234,6 +254,11 @@ export function useApi() {
     itop: {
       searchTickets(q: string, limit = 20): Promise<ItopTicketSummary[]> {
         return apiSend<ItopTicketSummary[]>('/api/itop/tickets/search', 'POST', { q, limit })
+      },
+      // The signed-in engineer's own ongoing tickets (newest first); the server
+      // resolves the iTop login from the session user.
+      myOngoingTickets(): Promise<ItopTicketSummary[]> {
+        return apiGet<ItopTicketSummary[]>('/api/itop/tickets/mine')
       },
       getTicket(ref: string): Promise<ItopTicketDetail> {
         return apiSend<ItopTicketDetail>('/api/itop/tickets/preview', 'POST', { ref })

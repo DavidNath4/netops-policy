@@ -1,5 +1,5 @@
 ---
-inclusion: always
+inclusion: manual
 ---
 
 # Project Context & Session Handoff
@@ -33,4 +33,6 @@ This is a **short, reusable memory** for Kiro chat sessions, not a full project 
 
 ## 4. Update procedure
 
-On **"save context" / "update context" / "simpan konteks"**: refresh Section 2 from verified outcomes; update Section 1 only when stable facts changed; replace obsolete notes instead of appending; do not rescan the whole project; confirm only after the write succeeds. On **"initialize context" / "inisialisasi konteks"**: examine only essential entry points (README, dependency manifest, root structure, relevant specs). **Keep this file under ~500 words** — it loads in every interaction.
+**Manual, user-triggered ONLY.** This file is updated solely when the user is about to switch chat sessions and explicitly asks for it. NEVER update it on your own initiative — not after a task, not after a code change, not at the end of a turn. No automatic or proactive writes.
+
+Only an explicit user command triggers a write — **"save context" / "update context" / "simpan konteks"** (meaning: I am moving to a new chat session, hand off now): refresh Section 2 from verified outcomes; update Section 1 only when stable facts changed; replace obsolete notes instead of appending; do not rescan the whole project; confirm only after the write succeeds. On **"initialize context" / "inisialisasi konteks"**: examine only essential entry points (README, dependency manifest, root structure, relevant specs). **Keep this file under ~500 words** — it loads in every interaction.

@@ -1,4 +1,4 @@
-import type { AclAddInput, AclDeleteInput, AclTimeRangeInput } from '#shared/schemas/acl.schema'
+import type { AclAddInput, AclAddTimeRange, AclDeleteInput, AclTimeRangeInput } from '#shared/schemas/acl.schema'
 import type { RouteAddInput, RouteDeleteInput } from '#shared/schemas/route.schema'
 
 // Static, hardcoded command-preview templates — one each for ACL add, ACL delete,
@@ -55,10 +55,14 @@ function previewTimeRange(tr: AclTimeRangeInput): { objectName: string, date: st
  * `configure terminal … exit` block (no ssh/credentials).
  *
  * - Plain add:            access-list KSEI-JMP extended permit ip <src> <dst>
- * - With a time range:    the `time-range <objectName>` object (name +
- *                         `absolute end <time> <date>`) is defined first, then
+ * - New-mode time range:  the `time-range <objectName>` object (name +
+ *                         `absolute end <time> <date>`) is DEFINED first, then
  *                         the permit line references it (`… time-range <name>`),
- *                         all ordered in the ONE block.
+ *                         all ordered in the ONE block, closed with `end`.
+ * - Existing-mode range:  the object already lives on the device, so NO
+ *                         definition lines are emitted — only the permit line(s)
+ *                         with the ` time-range <objectName>` suffix, closed
+ *                         with `exit` (no trailing `end`).
  * - Bidirectional:        both the forward and the reverse permit lines appear,
  *                         in order, inside the same block (reverse is prepared
  *                         by the caller by swapping source/destination + masks).
@@ -67,7 +71,7 @@ function previewTimeRange(tr: AclTimeRangeInput): { objectName: string, date: st
  *                         separately it still produces a valid single block.
  */
 export function renderAclAdd(
-  f: AclAddInput & { timeRange?: AclTimeRangeInput, reverse?: AclAddInput },
+  f: AclAddInput & { timeRange?: AclAddTimeRange, reverse?: AclAddInput },
 ): string[] {
   const permit = (a: AclAddInput, objectName?: string): string => {
     const src = joinAddr(a.source, a.sourceMask)
@@ -78,11 +82,19 @@ export function renderAclAdd(
 
   const lines = ['configure terminal']
   let objectName: string | undefined
+  // Only a NEW-mode time range defines the object inline (and closes with
+  // `end`); an EXISTING-mode range just references it by name.
+  let definesObject = false
 
-  // Build the time-range object first (as n8n does) when one is attached.
-  if (f.timeRange) {
+  if (f.timeRange?.mode === 'existing') {
+    // Existing object: reference by name only — no definition lines, no `end`.
+    objectName = f.timeRange.objectName
+  }
+  else if (f.timeRange) {
+    // New object: define it first (as n8n does), then reference it below.
     const { objectName: name, date, time } = previewTimeRange(f.timeRange)
     objectName = name
+    definesObject = true
     lines.push(`time-range ${objectName}`, `absolute end ${time} ${date}`)
   }
 
@@ -91,10 +103,10 @@ export function renderAclAdd(
   lines.push(permit(f, objectName))
   if (f.reverse) lines.push(permit(f.reverse, objectName))
 
-  // Close with `end` when a time-range object was configured (matches n8n),
-  // otherwise just `exit`.
-  lines.push(objectName ? 'end' : 'exit')
-  if (objectName) lines.push('exit')
+  // Close with `end` only when a NEW time-range object was DEFINED here (matches
+  // n8n); an existing reference or a plain add closes with just `exit`.
+  lines.push(definesObject ? 'end' : 'exit')
+  if (definesObject) lines.push('exit')
   return lines
 }
 

@@ -1,6 +1,8 @@
 import {
+  getAgentLoginsByContactId,
   getChangeDetail,
   getIncidentDetail,
+  getOngoingTicketsByLogin,
   getProblemDetail,
   getRequestDetail,
   getTicketByRef,
@@ -77,6 +79,19 @@ function toSummary(row: TicketRow): ItopTicketSummary {
  */
 export async function searchItopTickets(input: ItopTicketSearchInput): Promise<ItopTicketSummary[]> {
   const rows = await searchTickets(input.q, input.limit)
+  return rows.map(toSummary)
+}
+
+/**
+ * List the signed-in engineer's own ONGOING tickets (newest first), for the
+ * quick-pick list under the ticket search box. `login` is the engineer's iTop
+ * login (the NetOps session username, which equals `priv_user.login`). Returns
+ * [] when login is empty or the engineer has no ongoing assigned tickets.
+ */
+export async function getMyOngoingItopTickets(login: string | null, limit = 50): Promise<ItopTicketSummary[]> {
+  const l = login?.trim()
+  if (!l) return []
+  const rows = await getOngoingTicketsByLogin(l, limit)
   return rows.map(toSummary)
 }
 
@@ -161,9 +176,13 @@ export async function getItopTicketDetail(ref: string): Promise<ItopTicketDetail
 
   const contactIds = callerId ? [callerId] : []
   const orgIds = ticket.org_id ? [ticket.org_id] : []
-  const [contacts, orgs] = await Promise.all([
+  // Resolve the assigned agent's login(s) in parallel with caller/org so the
+  // ownership warning has the data (empty when the ticket has no agent).
+  const agentId = ticket.agent_id && ticket.agent_id !== 0 ? ticket.agent_id : null
+  const [contacts, orgs, ownerLogins] = await Promise.all([
     resolveContacts(contactIds),
     resolveOrganizations(orgIds),
+    agentId ? getAgentLoginsByContactId(agentId) : Promise.resolve<string[]>([]),
   ])
 
   const contact: ContactRow | undefined = contacts.find(c => c.id === callerId)
@@ -180,5 +199,6 @@ export async function getItopTicketDetail(ref: string): Promise<ItopTicketDetail
       name: org?.name ?? null,
     },
     detail: block,
+    ownerLogins,
   }
 }

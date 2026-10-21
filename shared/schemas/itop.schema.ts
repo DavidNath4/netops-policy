@@ -79,6 +79,10 @@ export const ItopTicketDetailSchema = ItopTicketSummarySchema.extend({
   caller: ItopTicketPartySchema, // resolved from caller_id/requestor_id -> contact
   organization: z.object({ name: z.string().nullable() }),
   detail: ItopTicketDetailBlockSchema,
+  // iTop login name(s) of the ticket's assigned AGENT (ticket.agent_id ->
+  // priv_user.login), used client-side to warn when the ticket is not owned by
+  // the signed-in engineer. Empty when the ticket has no agent/linked account.
+  ownerLogins: z.array(z.string()),
 })
 export type ItopTicketDetail = z.infer<typeof ItopTicketDetailSchema>
 

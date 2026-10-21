@@ -235,6 +235,37 @@ N8N_Client is called.
 3. THE `POST /api/n8n/test` endpoint SHALL require `assertSameOrigin` + `requirePermission(ADMINISTRATION_MANAGE)`, and its button SHALL be visible only when `canManage` is true (ticketing-itop and user-management specs).
 4. THE probe SHALL return a `ConnectionTestResult` `{ ok, message }` and SHALL never leak the API key.
 
+### Requirement 15: Existing time-range catalog (read-only `time/show`)
+
+**User Story:** As a network engineer, I want to pick an ACL time range from the objects that already exist on the device, so that I can reuse a pre-approved window without re-entering a date and time.
+
+The ACL Add page offers a "Select Existing" time-range mode (netops-policy-manager spec, Req 7a). To populate its dropdown, the application reads the device's existing time-range objects from a new read-only n8n webhook. This is a passive catalog fetch — it changes no device state and writes no audit row.
+
+#### Acceptance Criteria
+
+1. THE N8N_Client SHALL expose a bespoke helper (`fetchTimeRanges`) that issues `GET <N8N_BASE_URL>/time/show` with the `X-NetOps-Internal-Key: N8N_API_KEY` header, bounded by an `AbortController` timeout from `N8N_TIMEOUT_MS`, deriving the URL from `N8N_BASE_URL` (trailing slash tolerated) and never hardcoding it.
+2. THE helper SHALL tolerate an array-wrapped response (`[{ ... }]`) by unwrapping the first element before validating, exactly as the POST path's `normalize` does.
+3. THE helper SHALL validate the response with a Zod schema whose envelope is `{ success?, message?, total?, data[] }` and whose each `data` row is `{ name, type?, start_date?, start_time?, end_date?, end_time?, end_local?, raw_config? }` (every field except `name` nullable/optional; `data` defaulting to `[]`).
+4. THE helper SHALL NEVER throw: on any network/timeout/parse/validation failure or a non-success response it SHALL resolve to an empty object list plus a safe flag/message (`Time range request timed out` / `n8n is unreachable` / `Could not load existing time ranges`), and SHALL never log the N8N_API_Key.
+5. THE application SHALL map each raw row to the clean client shape `{ name, endDate, endTime, rawConfig }` (snake_case → camelCase; `undefined` coalesced to `null`) and SHALL NOT return raw n8n rows to the client.
+6. THE application SHALL expose the catalog at `GET /api/acl/time-ranges`, a thin handler gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_ADD)` that returns `{ objects }` via the standard envelope; because the helper never throws, a failed fetch still returns HTTP 200 with an empty list and the Add page falls back to "Create New".
+
+### Requirement 16: Time-range usage check on ACL delete (read-only `time/isUsed`)
+
+**User Story:** As a network engineer, when I delete an ACL whose rule references a time-range object, I want to be warned if that object is still used by OTHER ACL rules, so that I notice before removing a shared window.
+
+The ACL Delete "Generate" step, after confirming the rule exists, reads the matched rule's time-range object name from its rendered command and asks n8n whether that object is still used elsewhere. This is a passive usage probe — it changes no device state and writes no audit row. The resulting warning is advisory and never blocks the delete.
+
+#### Acceptance Criteria
+
+1. THE N8N_Client SHALL expose a bespoke helper (`checkTimeRangeUsage`) that issues `POST <N8N_BASE_URL>/time/isUsed` with body `{ user, pass, timeObject: [names] }` and the `X-NetOps-Internal-Key: N8N_API_KEY` header, bounded by an `AbortController` timeout from `N8N_TIMEOUT_MS`, deriving the URL from `N8N_BASE_URL` (trailing slash tolerated). The `user`/`pass` are the device credentials typed on the delete page; they are NEVER logged.
+2. THE helper SHALL tolerate an array-wrapped response, and SHALL validate it with a Zod schema whose envelope is `{ success?, message?, total?, data[] }` and whose each `data` row is `{ name, is_used?, usage_count?, raw_commands[] }` (`raw_commands` defaulting to `[]`).
+3. THE helper SHALL NEVER throw: on any network/timeout/parse/validation failure or a non-success response it SHALL resolve to an empty usage list plus a safe message, so the delete flow proceeds WITHOUT the warning.
+4. THE application SHALL map each raw row to the clean client shape `{ name, isUsed, usageCount, rawCommands }` and SHALL NOT return raw n8n rows to the client.
+5. THE application SHALL expose the check at `POST /api/acl/time-range-usage`, a thin handler gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_DELETE)` (POST, so credentials never appear in the URL/logs) that returns `{ usages }` via the standard envelope.
+6. THE time-range object name SHALL be derived client-side from the matched rule's rendered command as the token following the final `time-range ` (the device renders a time-bound rule as `... time-range <name>` at the end of the line). WHERE the matched rule has no time range, the usage check SHALL be skipped.
+7. THE warning SHALL list only the OTHER rules still using the object — the raw command(s) of the rule being deleted (either direction) SHALL be excluded before deciding whether to warn; the warning SHALL appear only when at least one other rule remains. The warning is advisory and SHALL NOT block generate or execute.
+
 ## Non-Functional Requirements
 
 ### Security

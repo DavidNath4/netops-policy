@@ -24,7 +24,13 @@ export default defineEventHandler(async (event) => {
   }
 
   const db = useDatabase()
-  const creds = await getDeviceCredentials(db, event)
+  // Prefer the per-request credentials typed on the calling page (the Add/Delete
+  // "Generate" pre-check sends them); fall back to the Device Session
+  // Credentials for the search page, which has no credential inputs.
+  const { execUsername, execPassword } = parsed.data
+  const creds = execUsername && execPassword
+    ? { username: execUsername, password: execPassword }
+    : await getDeviceCredentials(db, event)
   if (!creds) {
     throw apiError(400, 'DEVICE_CREDENTIALS_REQUIRED', 'Enter your device credentials to search')
   }

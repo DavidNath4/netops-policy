@@ -7,11 +7,53 @@
 import type { AclPreviewInput } from '#shared/schemas/acl.schema'
 import type { ItopTicketSummary } from '#shared/schemas/itop.schema'
 import type { OperationResult } from '#shared/schemas/n8n.schema'
+import type { TimeRangeObject } from '#shared/schemas/time-range.schema'
 import { autoCorrectAclIp, isValidIpv4 } from '#shared/schemas/network.schema'
 
 definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_ADD' })
 
 const api = useApi()
+
+// Existing on-device time-range objects for the "Select Existing" dropdown,
+// fetched once on mount. If the fetch fails the list stays empty and
+// `timeRangeLoadError` flips — the operator can still use "Create New".
+const timeRangeObjects = ref<TimeRangeObject[]>([])
+const timeRangeLoading = ref(false)
+const timeRangeLoadError = ref(false)
+
+onMounted(async () => {
+  timeRangeLoading.value = true
+  try {
+    const { objects } = await api.aclOps.timeRanges()
+    timeRangeObjects.value = objects
+  }
+  catch {
+    timeRangeLoadError.value = true
+  }
+  finally {
+    timeRangeLoading.value = false
+  }
+})
+
+/** The end-detail line shown under each object name (fallback to raw config). */
+function timeRangeDetail(o: TimeRangeObject): string {
+  if (o.endDate || o.endTime) {
+    return `ends ${o.endDate ?? '?'} ${o.endTime ?? ''}`.trim()
+  }
+  return o.rawConfig ?? ''
+}
+
+// Items for the searchable Select Existing dropdown. Built once from the loaded
+// catalog (no extra API hit — the search filters this in-memory list). Each item
+// carries the object `name` as its value plus a `detail` line (end date/time or
+// raw config) rendered as a small description; both are searchable.
+const timeRangeItems = computed(() =>
+  timeRangeObjects.value.map(o => ({
+    label: o.name,
+    detail: timeRangeDetail(o),
+    value: o.name,
+  })),
+)
 
 const form = reactive({
   source: '',
@@ -21,10 +63,14 @@ const form = reactive({
   changeTicket: '',
   execUsername: '',
   execPassword: '',
-  // Optional time-range (ACL ADD only). `enabled` toggles the extra fields;
-  // when on, `date` (ISO yyyy-mm-dd) is required and `time` is typed manually
-  // (HH:mm, 24h) and defaults to 23:59.
+  // Optional time-range (ACL ADD only). `enabled` toggles the extra fields; it
+  // then runs in ONE of two modes:
+  // - 'existing' (default): pick an on-device object by name (`timeRangeObject`).
+  // - 'new': define a new object — `date` (ISO yyyy-mm-dd) is required and
+  //   `time` is typed manually (HH:mm, 24h), defaulting to 23:59.
   timeRangeEnabled: false,
+  timeRangeMode: 'existing' as 'existing' | 'new',
+  timeRangeObject: '',
   timeRangeDate: '',
   timeRangeTime: '23:59',
   // Bidirectional ADD (ACL ADD only): when on, the server ALSO adds the reverse
@@ -54,13 +100,21 @@ function onTicketSelected(t: ItopTicketSummary) {
 }
 
 // Build the field payload for preview/execute (ADD). The time-range unit is
-// included ONLY when the toggle is on and a date is picked; otherwise the three
-// keys are omitted entirely so the body stays { source, destination, ... } as
-// today. The server derives the exact wire format (objectName/date/time).
+// included ONLY when the toggle is on and the active mode has a value; otherwise
+// it is omitted so the body stays { source, destination, ... } as today.
+// - 'existing' → { mode: 'existing', objectName } (server sends ONLY the name).
+// - 'new'      → { mode: 'new', date, time } (server derives objectName/date/time).
+type AddTimeRange = Extract<AclPreviewInput, { operation: 'ADD' }>['timeRange']
 function buildPayload(plan: RunPlan = runPlan.value): AclPreviewInput {
-  const timeRange = form.timeRangeEnabled && form.timeRangeDate
-    ? { date: form.timeRangeDate, time: form.timeRangeTime || '23:59' }
-    : undefined
+  let timeRange: AddTimeRange
+  if (form.timeRangeEnabled) {
+    if (form.timeRangeMode === 'existing' && form.timeRangeObject) {
+      timeRange = { mode: 'existing', objectName: form.timeRangeObject }
+    }
+    else if (form.timeRangeMode === 'new' && form.timeRangeDate) {
+      timeRange = { mode: 'new', date: form.timeRangeDate, time: form.timeRangeTime || '23:59' }
+    }
+  }
   const src = form.source.trim()
   const srcMask = form.sourceMask.trim() || undefined
   const dst = form.destination.trim()
@@ -116,6 +170,24 @@ const executing = ref(false)
 const confirmOpen = ref(false)
 const result = ref<OperationResult | null>(null)
 
+// The IP (+ optional mask) pair processed by each direction of the last execute,
+// captured BEFORE resetFields() wipes the form so the result pop-up can show
+// exactly what succeeded. `reverse` is set only on a bidirectional run.
+// IPs are run through autoCorrectAclIp to mirror the server's correction.
+const resultDirections = ref<{ forward: string, reverse: string | null } | null>(null)
+
+/** Format an "IP mask" endpoint (mask omitted when blank). */
+function fmtEndpoint(ip: string, mask: string): string {
+  const ipC = autoCorrectAclIp(ip.trim())
+  const m = mask.trim()
+  return m ? `${ipC} ${m}` : ipC
+}
+
+/** "src → dst" line for one direction, using the corrected IPs. */
+function fmtDirection(srcIp: string, srcMask: string, dstIp: string, dstMask: string): string {
+  return `${fmtEndpoint(srcIp, srcMask)} → ${fmtEndpoint(dstIp, dstMask)}`
+}
+
 // Single result/alert pop-up driving ResultDialog; replaces the two in-page
 // UAlert (error/warning) blocks. `showDialog` opens it with a variant + copy.
 const dialog = reactive({
@@ -144,12 +216,19 @@ function toMessage(e: unknown, fallback: string): string {
 watch(form, () => {
   preview.value = null
   result.value = null
+  resultDirections.value = null
   runPlan.value = 'forward'
 })
 
 // Block submit on malformed IPs (defense-in-depth; the server re-validates too).
 const ipsValid = computed(() =>
   isValidIpv4(form.source) && isValidIpv4(form.destination),
+)
+
+// Generate runs an n8n pre-check (acl/show) that now authenticates with the
+// credentials typed on THIS page, so both must be filled before Generate.
+const credsFilled = computed(() =>
+  form.execUsername.trim() !== '' && form.execPassword !== '',
 )
 
 // Time is typed manually (no rolling picker). Keep only digits and a single ":",
@@ -167,17 +246,32 @@ const timeFormatValid = computed(() =>
   form.timeRangeTime === '' || TIME_RE.test(form.timeRangeTime),
 )
 
-// When the time range is enabled a date must be picked and, if a time was typed,
-// it must be a valid HH:mm (an empty time falls back to 23:59, so it never
-// blocks). When disabled, the time range never blocks Generate.
-const timeRangeValid = computed(() =>
-  !form.timeRangeEnabled || (form.timeRangeDate !== '' && timeFormatValid.value),
-)
+// When the time range is enabled it must be complete for the active mode:
+// - 'existing' → an object must be selected.
+// - 'new'      → a date must be picked and, if a time was typed, it must be a
+//   valid HH:mm (an empty time falls back to 23:59, so it never blocks).
+// When disabled, the time range never blocks Generate.
+const timeRangeValid = computed(() => {
+  if (!form.timeRangeEnabled) return true
+  if (form.timeRangeMode === 'existing') return form.timeRangeObject !== ''
+  return form.timeRangeDate !== '' && timeFormatValid.value
+})
 
 async function onGenerate() {
   result.value = null
   if (!ipsValid.value) {
     showDialog('error', 'Invalid input', 'Enter a valid IPv4 address for Source and Destination.')
+    return
+  }
+  // Block identical endpoints: Source and Destination may not resolve to the
+  // same IPv4 address. Compare AFTER auto-correction (ticket IP vs its corrected
+  // form), so this runs for both one-way and bidirectional before any pre-check.
+  if (autoCorrectAclIp(form.source.trim()) === autoCorrectAclIp(form.destination.trim())) {
+    showDialog(
+      'warning',
+      'Source dan Destination sama',
+      'Source dan Destination tidak boleh menggunakan IP yang sama. Perbaiki salah satu alamat sebelum melanjutkan.',
+    )
     return
   }
   generating.value = true
@@ -186,15 +280,20 @@ async function onGenerate() {
       // Bidirectional pre-check: look up BOTH directions. The checkbox stays ON
       // in every case; `runPlan` narrows what actually runs so an already-present
       // direction is skipped rather than re-added.
+      const creds = { execUsername: form.execUsername, execPassword: form.execPassword }
       const [forwardExists, reverseExists] = await Promise.all([
-        aclExists(form.source, form.destination),
-        aclExists(form.destination, form.source),
+        aclExists(form.source, form.destination, creds),
+        aclExists(form.destination, form.source, creds),
       ])
 
       if (forwardExists && reverseExists) {
         // Both present: nothing to do. Stop without a preview.
         preview.value = null
-        showDialog('warning', 'Nothing to add', 'Both directions already exist. Nothing to add.')
+        showDialog(
+          'warning',
+          'ACL sudah ada',
+          'Kedua arah (Source → Destination dan sebaliknya) sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.',
+        )
         return
       }
       if (forwardExists) {
@@ -230,9 +329,16 @@ async function onGenerate() {
 
     // One-way ADD (checkbox off): today's exact behavior.
     runPlan.value = 'forward'
-    const exists = await aclExists(form.source, form.destination)
+    const exists = await aclExists(form.source, form.destination, {
+      execUsername: form.execUsername,
+      execPassword: form.execPassword,
+    })
     if (exists) {
-      showDialog('warning', 'Nothing to add', 'This ACL (source → destination) already exists. Nothing to add.')
+      showDialog(
+        'warning',
+        'ACL sudah ada',
+        'ACL untuk Source → Destination ini sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.',
+      )
       return
     }
     const { preview: text } = await api.aclOps.preview(buildPayload('forward'))
@@ -256,6 +362,8 @@ function resetFields() {
   form.execUsername = ''
   form.execPassword = ''
   form.timeRangeEnabled = false
+  form.timeRangeMode = 'existing'
+  form.timeRangeObject = ''
   form.timeRangeDate = ''
   form.timeRangeTime = '23:59'
   form.bidirectional = false
@@ -271,6 +379,17 @@ async function onExecuteConfirmed() {
     // Execute is never called twice from the client.
     const res = await api.aclOps.execute(buildPayload())
     confirmOpen.value = false
+    // Capture which IP (+ mask) pairs were processed BEFORE the form is reset,
+    // so the pop-up shows the exact directions that ran. 'reverse' is the only
+    // plan that sends the swapped direction as the single/forward run; 'both'
+    // adds the swapped direction as the nested reverse result.
+    const plan = runPlan.value
+    const forwardLine = plan === 'reverse'
+      ? fmtDirection(form.destination, form.destinationMask, form.source, form.sourceMask)
+      : fmtDirection(form.source, form.sourceMask, form.destination, form.destinationMask)
+    const reverseLine = res.reverse
+      ? fmtDirection(form.destination, form.destinationMask, form.source, form.sourceMask)
+      : null
     // Combined outcome: the whole operation is a failure if EITHER direction
     // failed (the reverse direction is present only on a bidirectional run).
     const allOk = res.status === 'SUCCESS' && (!res.reverse || res.reverse.status === 'SUCCESS')
@@ -282,6 +401,7 @@ async function onExecuteConfirmed() {
       await nextTick()
     }
     result.value = res
+    resultDirections.value = { forward: forwardLine, reverse: reverseLine }
     showDialog(
       allOk ? 'success' : 'error',
       allOk ? 'Execution succeeded' : 'Execution failed',
@@ -430,33 +550,107 @@ const inputClass
             Time Range (optional)
           </label>
 
-          <div class="flex items-center gap-2">
-            <input
-              v-model="form.timeRangeDate"
-              type="date"
-              aria-label="Time range date"
-              :disabled="!form.timeRangeEnabled"
-              :class="inputClass"
+          <!-- Two modes, tabbed. Select Existing is the default/first tab (pick
+               an object already on the device); Create New is second (today's
+               date + HH:mm, which the server derives into a new object). Only
+               shown while the checkbox is on. -->
+          <template v-if="form.timeRangeEnabled">
+            <div
+              class="grid grid-cols-2 gap-1 rounded-md border border-line bg-surface p-1"
+              role="tablist"
+              aria-label="Time Range mode"
             >
-            <input
-              v-model="form.timeRangeTime"
-              type="text"
-              inputmode="numeric"
-              maxlength="5"
-              placeholder="23:59"
-              aria-label="Time range time (HH:mm, 24-hour)"
-              :disabled="!form.timeRangeEnabled"
-              :class="[inputClass, 'w-24', form.timeRangeEnabled && !timeFormatValid ? 'border-bad' : '']"
-              @input="onTimeInput"
-            >
-          </div>
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="form.timeRangeMode === 'existing'"
+                class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                :class="form.timeRangeMode === 'existing' ? 'bg-panel text-brand shadow-sm' : 'text-muted hover:text-ink'"
+                @click="form.timeRangeMode = 'existing'"
+              >
+                Select Existing
+              </button>
+              <button
+                type="button"
+                role="tab"
+                :aria-selected="form.timeRangeMode === 'new'"
+                class="rounded px-3 py-1.5 text-xs font-semibold transition-colors"
+                :class="form.timeRangeMode === 'new' ? 'bg-panel text-brand shadow-sm' : 'text-muted hover:text-ink'"
+                @click="form.timeRangeMode = 'new'"
+              >
+                Create New
+              </button>
+            </div>
 
-          <p v-if="form.timeRangeEnabled && !form.timeRangeDate" class="text-[11px] text-muted">
-            Pick a date; time defaults to 23:59.
-          </p>
-          <p v-else-if="form.timeRangeEnabled && !timeFormatValid" class="text-[11px] text-bad" role="alert">
-            Time must be HH:mm (24-hour), e.g. 23:59.
-          </p>
+            <!-- Select Existing: searchable combobox over the catalog loaded on
+                 mount. The search filters this in-memory list (name + detail) —
+                 it never hits the API again. The panel shows ~10 rows then
+                 scrolls (max-height on the content viewport). -->
+            <div v-if="form.timeRangeMode === 'existing'" class="flex flex-col gap-1">
+              <USelectMenu
+                v-model="form.timeRangeObject"
+                :items="timeRangeItems"
+                value-key="value"
+                label-key="label"
+                :filter-fields="['label', 'detail']"
+                :search-input="{ placeholder: 'Search time range...' }"
+                placeholder="Select time range..."
+                color="neutral"
+                variant="outline"
+                class="w-full"
+                aria-label="Time range object"
+                :ui="{
+                  base: 'bg-panel text-ink ring-line',
+                  content: 'bg-panel ring-line',
+                  viewport: 'max-h-[20rem]',
+                }"
+              >
+                <template #item-label="{ item }">
+                  <div class="flex flex-col">
+                    <span class="text-xs text-ink">{{ item.label }}</span>
+                    <span v-if="item.detail" class="text-[10px] text-muted">{{ item.detail }}</span>
+                  </div>
+                </template>
+              </USelectMenu>
+              <p v-if="timeRangeLoading" class="text-[11px] text-muted">
+                Loading existing time range objects...
+              </p>
+              <p v-else-if="timeRangeLoadError || timeRangeObjects.length === 0" class="text-[11px] text-muted">
+                No existing time range objects could be loaded. Use Create New instead.
+              </p>
+              <p v-else class="text-[11px] text-muted">
+                Select a previously created time range object.
+              </p>
+            </div>
+
+            <!-- Create New: unchanged date + HH:mm behavior. -->
+            <div v-else class="flex flex-col gap-1">
+              <div class="flex items-center gap-2">
+                <input
+                  v-model="form.timeRangeDate"
+                  type="date"
+                  aria-label="Time range date"
+                  :class="inputClass"
+                >
+                <input
+                  v-model="form.timeRangeTime"
+                  type="text"
+                  inputmode="numeric"
+                  maxlength="5"
+                  placeholder="23:59"
+                  aria-label="Time range time (HH:mm, 24-hour)"
+                  :class="[inputClass, 'w-24', !timeFormatValid ? 'border-bad' : '']"
+                  @input="onTimeInput"
+                >
+              </div>
+              <p v-if="!form.timeRangeDate" class="text-[11px] text-muted">
+                Pick a date; time defaults to 23:59.
+              </p>
+              <p v-else-if="!timeFormatValid" class="text-[11px] text-bad" role="alert">
+                Time must be HH:mm (24-hour), e.g. 23:59.
+              </p>
+            </div>
+          </template>
         </div>
       </div>
 
@@ -487,7 +681,7 @@ const inputClass
           <button
             v-if="!preview"
             type="submit"
-            :disabled="generating || !ipsValid || !form.changeTicket || !timeRangeValid"
+            :disabled="generating || !credsFilled || !ipsValid || !form.changeTicket || !timeRangeValid"
             class="inline-flex h-[38px] items-center gap-1.5 rounded-md bg-brand px-4 text-xs font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-60"
           >
             <UIcon :name="generating ? 'i-lucide-loader-circle' : 'i-lucide-terminal'" class="size-4" :class="{ 'animate-spin': generating }" />
@@ -525,24 +719,30 @@ const inputClass
     >
       <template v-if="result" #body>
         <div class="flex flex-col gap-3">
-          <!-- Primary (forward) direction. When a reverse result is present this
-               block is labelled so the two directions read as distinct runs. -->
+          <!-- Primary direction. The heading reads "Source → Destination" and the
+               body line shows the exact IP (+ mask) pair that was processed, so
+               the operator sees what succeeded even when the device returns no
+               output. When a reverse result is present the heading labels it. -->
           <div class="flex flex-col gap-1.5">
             <p v-if="result.reverse" class="text-[11px] font-semibold text-muted">
               Source → Destination · {{ result.status }}
             </p>
             <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+              <pre v-if="resultDirections" class="whitespace-pre-wrap break-all text-terminal-text">{{ resultDirections.forward }}</pre>
               <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
               <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
             </div>
           </div>
 
-          <!-- Reverse direction (bidirectional runs only): its own status + output. -->
+          <!-- Reverse direction (bidirectional runs only): its own status + the
+               swapped IP (+ mask) pair. Heading also reads "Source → Destination"
+               per the requested copy. -->
           <div v-if="result.reverse" class="flex flex-col gap-1.5">
             <p class="text-[11px] font-semibold text-muted">
-              Destination → Source · {{ result.reverse.status }}
+              Source → Destination · {{ result.reverse.status }}
             </p>
             <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
+              <pre v-if="resultDirections?.reverse" class="whitespace-pre-wrap break-all text-terminal-text">{{ resultDirections.reverse }}</pre>
               <pre v-if="result.reverse.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.reverse.output }}</pre>
               <pre v-else-if="result.reverse.error" class="whitespace-pre-wrap break-all text-bad">{{ result.reverse.error }}</pre>
             </div>

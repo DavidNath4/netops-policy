@@ -117,6 +117,7 @@ export interface TicketRow extends mysql.RowDataPacket {
   description: string | null
   finalclass: string | null
   caller_id: number | null
+  agent_id: number | null
   org_id: number | null
 }
 
@@ -178,13 +179,57 @@ export async function searchTickets(q: string, limit: number): Promise<TicketRow
 export async function getTicketByRef(ref: string): Promise<TicketRow | null> {
   const rows = await run<TicketRow[]>(
     `SELECT id, ref, title, operational_status, start_date, end_date, description,
-            finalclass, caller_id, org_id
+            finalclass, caller_id, agent_id, org_id
      FROM ticket
      WHERE ref = ?
      LIMIT 1`,
     [ref],
   )
   return rows[0] ?? null
+}
+
+export interface UserLoginRow extends mysql.RowDataPacket {
+  login: string | null
+}
+
+/**
+ * Resolve the iTop login name(s) of the user account(s) linked to a ticket's
+ * AGENT (`ticket.agent_id`), via `priv_user.contactid = agent_id`. The agent is
+ * the engineer the ticket is assigned to — confirmed against the live schema as
+ * the "owner" to compare against the NetOps session user (the caller_id column
+ * is the requester/reporter, NOT a login account). One contact can map to more
+ * than one `priv_user` row, so this returns ALL logins (callers match against
+ * any of them). Returns [] when the ticket has no agent or no linked account.
+ */
+export async function getAgentLoginsByContactId(agentId: number): Promise<string[]> {
+  const rows = await run<UserLoginRow[]>(
+    `SELECT login FROM priv_user WHERE contactid = ? AND login IS NOT NULL AND login <> ''`,
+    [agentId],
+  )
+  return rows.map(r => r.login).filter((l): l is string => typeof l === 'string' && l.length > 0)
+}
+
+/**
+ * List the ONGOING tickets assigned to the engineer whose iTop login matches
+ * `login` (case-insensitively), newest first. Resolves the agent via
+ * `priv_user.contactid` → `ticket.agent_id`, filters `operational_status =
+ * 'ongoing'`, and returns parent `ticket` summary columns only (same shape as
+ * searchTickets). `limit` caps the rows; empty when the login has no ongoing
+ * assigned tickets. Login is bound as a `?` placeholder.
+ */
+export async function getOngoingTicketsByLogin(login: string, limit: number): Promise<TicketRow[]> {
+  return run<TicketRow[]>(
+    `SELECT id, ref, title, operational_status, start_date, end_date, finalclass
+     FROM ticket
+     WHERE operational_status = 'ongoing'
+       AND agent_id IN (
+         SELECT contactid FROM priv_user
+         WHERE LOWER(login) = LOWER(?) AND contactid IS NOT NULL AND contactid <> 0
+       )
+     ORDER BY start_date DESC, id DESC
+     LIMIT ?`,
+    [login, limit],
+  )
 }
 
 /** UserRequest detail row (shares the parent `ticket.id`). */

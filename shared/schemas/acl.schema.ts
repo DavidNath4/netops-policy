@@ -21,6 +21,13 @@ export const AclShowSchema = z.object({
     .trim()
     .min(1, 'Search value is required')
     .max(256, 'Search value must be at most 256 characters'),
+  // Optional per-request device credentials. The ACL Add/Delete "Generate"
+  // pre-check sends the credentials typed ON THAT page so the lookup runs as
+  // that engineer. When BOTH are present the server uses them; otherwise it
+  // falls back to the caller's Device Session Credentials (the search page,
+  // which has no credential inputs, relies on that fallback). Never persisted.
+  execUsername: z.string().trim().min(1).max(128).optional(),
+  execPassword: z.string().min(1).max(256).optional(),
 })
 export type AclShowInput = z.infer<typeof AclShowSchema>
 
@@ -76,6 +83,42 @@ export const AclTimeRangeSchema = z.object({
 })
 export type AclTimeRangeInput = z.infer<typeof AclTimeRangeSchema>
 
+/**
+ * The ACL ADD time range comes in TWO modes, discriminated on `mode`:
+ *
+ * - `new`:      define a brand-new object — the existing `{ date, time }` unit
+ *               (same validation + the 23:59 default) tagged with `mode: 'new'`.
+ *               The service derives the three n8n keys (objectName/date/time)
+ *               via `deriveAclTimeRange`, exactly as before.
+ * - `existing`: reference an object that already lives on the device, picked by
+ *               its opaque `objectName` (from `GET /time/show`). The service
+ *               sends ONLY `objectName` — never a date or time — and the preview
+ *               references it without the time-range definition lines.
+ *
+ * Either mode is optional on the ADD branch; its absence is an ordinary add.
+ * DELETE/SHOW never carry a time range.
+ */
+export const AclTimeRangeNewSchema = AclTimeRangeSchema.extend({
+  mode: z.literal('new'),
+})
+export type AclTimeRangeNewInput = z.infer<typeof AclTimeRangeNewSchema>
+
+export const AclTimeRangeExistingSchema = z.object({
+  mode: z.literal('existing'),
+  objectName: z
+    .string()
+    .trim()
+    .min(1, 'Select a time range object')
+    .max(128, 'Time range object name must be at most 128 characters'),
+})
+export type AclTimeRangeExistingInput = z.infer<typeof AclTimeRangeExistingSchema>
+
+export const AclAddTimeRangeSchema = z.discriminatedUnion('mode', [
+  AclTimeRangeExistingSchema,
+  AclTimeRangeNewSchema,
+])
+export type AclAddTimeRange = z.infer<typeof AclAddTimeRangeSchema>
+
 /** Full English month names, indexed 0=January..11=December. */
 const MONTH_NAMES = [
   'January', 'February', 'March', 'April', 'May', 'June',
@@ -112,8 +155,10 @@ export const AclPreviewSchema = z.discriminatedUnion('operation', [
   z.object({ operation: z.literal('ADD') })
     .merge(AclFields)
     .merge(ExecCredentialsSchema)
-    // Optional: present only for an ADD with a time range (all-or-none unit).
-    .extend({ timeRange: AclTimeRangeSchema.optional() })
+    // Optional: present only for an ADD with a time range. Discriminated on
+    // `mode` — `new` carries the `{date,time}` unit (derived server-side),
+    // `existing` carries only the picked `objectName`.
+    .extend({ timeRange: AclAddTimeRangeSchema.optional() })
     // Optional bidirectional ADD (ADD only): when true the server ALSO adds the
     // reverse direction (source<->destination and their masks swapped) as a
     // second, independent n8n ACL ADD call. Absent/false = ordinary one-way add.

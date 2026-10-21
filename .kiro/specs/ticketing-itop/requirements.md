@@ -53,17 +53,44 @@ search/preview, and the Log Trail / `changeTicket` audit storage (unchanged).
 4. IF the query is empty, longer than 64 chars, or missing, THEN THE API_Layer SHALL reject with `VALIDATION_ERROR` and SHALL NOT touch iTop.
 5. IF iTop is unconfigured, unreachable, or times out, THEN THE `POST /api/itop/tickets/search` endpoint SHALL return `ITOP_UNREACHABLE` (HTTP 502) with a safe message and SHALL NOT surface SQL, stack, connection string, or credentials.
 
+### Requirement 1a: My ongoing tickets quick-pick
+
+**User Story:** As a network engineer, I want to see my own ongoing tickets under the search box, so that I can attach one directly without searching.
+
+#### Acceptance Criteria
+
+1. WHEN the ticket picker opens, THE client SHALL call `GET /api/itop/tickets/mine` and render the returned tickets as a quick-pick list under the search box; selecting one SHALL feed the SAME preview flow as a search result (including the ownership/status advisory warnings of Requirement 2a).
+2. THE `GET /api/itop/tickets/mine` endpoint SHALL be auth-only (no new RBAC permission) and SHALL derive the iTop login SERVER-SIDE from the authenticated user's `username` (which equals `priv_user.login`); the client SHALL NOT supply the login.
+3. THE Itop_Service SHALL return the engineer's tickets whose `operational_status = 'ongoing'` AND whose `ticket.agent_id` resolves (via `priv_user.contactid`) to a `priv_user.login` matching the username case-insensitively, ordered newest first (`start_date` desc, then `id` desc), capped at a safe limit, as `ItopTicketSummary[]`.
+4. WHERE the authenticated user has no `username`, THE service SHALL return an empty list WITHOUT querying iTop; WHERE the engineer has no ongoing assigned tickets, it SHALL return an empty list.
+5. THE client SHALL show at most ~3 rows before the list scrolls, and SHALL treat the list as a convenience: a load failure SHALL be silent and SHALL NOT block search (the quick-pick list is simply hidden/empty).
+6. IF iTop is unconfigured, unreachable, or times out, THEN the endpoint SHALL return `ITOP_UNREACHABLE` (HTTP 502) with a safe message and SHALL NOT surface SQL, stack, connection string, or credentials.
+
 ### Requirement 2: iTop ticket preview
 
 **User Story:** As a network engineer, I want to preview a selected ticket's detail before attaching it, so that I confirm it is the right change.
 
 #### Acceptance Criteria
 
-1. WHEN an engineer selects a ticket `ref` (`ItopTicketRefSchema`, `{ ref }` trimmed 1..64), THE Itop_Service SHALL fetch that single `ticket` row by its indexed `ref`, resolve the one type-specific detail table from `finalclass`, resolve caller/organization names via separate PK `IN (?)` lookups, and return an `ItopTicketDetail` (summary + resolved caller name/email + organization name + a per-type detail block + description).
+1. WHEN an engineer selects a ticket `ref` (`ItopTicketRefSchema`, `{ ref }` trimmed 1..64), THE Itop_Service SHALL fetch that single `ticket` row by its indexed `ref`, resolve the one type-specific detail table from `finalclass`, resolve caller/organization names via separate PK `IN (?)` lookups, resolve the assigned agent's login(s), and return an `ItopTicketDetail` (summary + resolved caller name/email + organization name + a per-type detail block + description + `ownerLogins`).
 2. THE preview SHALL return only mapped, whitelisted fields — never a raw DB row.
 3. THE preview SHALL pass every iTop-sourced string (title, description, caller/org names, every detail-block field) as plain text; the UI SHALL render ALL of them escaped (`{{ }}`), never via `v-html` or any raw-HTML sink, because iTop rich-text fields may contain HTML/script.
 4. IF no ticket matches the `ref`, THEN THE `POST /api/itop/tickets/preview` endpoint SHALL return `NOT_FOUND`.
 5. IF iTop is unconfigured, unreachable, or times out, THEN the preview endpoint SHALL return `ITOP_UNREACHABLE` (HTTP 502) with a safe message.
+
+### Requirement 2a: Advisory ownership and status warnings on ticket select
+
+**User Story:** As a network engineer, I want to be warned when I pick a ticket that is not assigned to me or that is no longer ongoing, so that I notice a likely mistake while still being able to proceed when I mean to.
+
+These are **advisory warnings only**: they appear in the ticket preview before the engineer confirms "Use this ticket", and they NEVER block selection or the subsequent generate/execute. They apply uniformly to every feature that attaches a change ticket (ACL add, ACL delete, Route add, Route delete) because all four use the shared ticket picker.
+
+#### Acceptance Criteria
+
+1. THE Itop_Service SHALL resolve the ticket's assigned-agent login(s) from `ticket.agent_id` via `priv_user.contactid = agent_id` (selecting non-empty `priv_user.login`), returning ALL matching logins as `ownerLogins` (one contact may map to several `priv_user` rows). WHERE the ticket has no agent (`agent_id` null or `0`) or no linked account, `ownerLogins` SHALL be `[]`.
+2. `ticket.agent_id` (the assigned engineer) — NOT `caller_id` (the requester/reporter) — SHALL be the owner compared for the ownership warning.
+3. WHEN a ticket is previewed AND the signed-in user's `username` is set AND `ownerLogins` is non-empty AND no entry of `ownerLogins` equals that username compared case-insensitively (trimmed), THE ticket picker SHALL show an ownership warning naming the iTop owner(s). WHERE the username is absent or `ownerLogins` is empty, no ownership warning SHALL be shown (warn only on a positive mismatch).
+4. WHEN a ticket is previewed AND its `operationalStatus` is any value other than `ongoing` (the valid iTop values are `closed`, `ongoing`, `resolved`), THE ticket picker SHALL show a status warning naming the current status. WHEN `operationalStatus` is `ongoing`, no status warning SHALL be shown.
+5. THE warnings SHALL be informational (dismissible by proceeding): "Use this ticket" SHALL stay enabled regardless of either warning, and confirming SHALL attach the ticket exactly as before.
 
 ### Requirement 3: finalclass → detail-table mapping
 

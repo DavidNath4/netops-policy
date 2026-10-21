@@ -63,13 +63,22 @@ the current contract. The Zod schemas (`shared/schemas/acl.schema.ts`,
   `destinationMask` (optional), and a **required** `changeTicket`. ADD and DELETE
   share the same shape. The service joins IP + mask into `"IP MASK"` strings for
   the n8n body (n8n-integration spec).
-- **ACL add — optional time range** (ADD only): the user may additionally pick a
-  single date and time. When set, the ACL ADD carries a `timeRange` unit
-  (`{ date: yyyy-mm-dd, time: HH:mm }`, time defaulting to `23:59`) from which
-  the server derives three extra n8n keys — `objectName` (`dd-MMM-yyyy`, lowercase
-  3-letter month, e.g. `30-oct-2026`), `date` (`dd MonthFullEnglish yyyy`, e.g.
-  `30 October 2026`), and `time` (`HH:mm`). They are sent as one unit (all three
-  or none); their absence means an ordinary ADD. DELETE never carries a time range.
+- **ACL add — optional time range** (ADD only): the user may additionally attach
+  a `timeRange` unit, which is a discriminated union on `mode` with TWO modes.
+  - **new** — define a brand-new object: `{ mode: 'new', date: yyyy-mm-dd, time:
+    HH:mm }` (time defaulting to `23:59`), from which the server derives three
+    extra n8n keys — `objectName` (`dd-MMM-yyyy`, lowercase 3-letter month, e.g.
+    `30-oct-2026`), `date` (`dd MonthFullEnglish yyyy`, e.g. `30 October 2026`),
+    and `time` (`HH:mm`). They are sent as one unit (all three or none).
+  - **existing** — reference an object that already lives on the device:
+    `{ mode: 'existing', objectName }` (a non-empty, trimmed opaque name chosen
+    from the device's time-range catalog, see the n8n-integration spec). The
+    server sends ONLY `objectName` to n8n — never a `date` or `time` key.
+
+  The catalog of existing objects is fetched read-only when the ACL Add page
+  loads (`GET /api/acl/time-ranges`, gated by `ACL_POLICIES_ADD`; see the
+  n8n-integration spec). The time range's absence means an ordinary ADD. DELETE
+  never carries a time range.
 - **ACL add — optional bidirectional** (ADD only): the ADD member may carry an
   optional `bidirectional` boolean. When true the server also adds the reverse
   direction (Source/Destination and their masks swapped) as a second, independent
@@ -105,7 +114,7 @@ The three ACL operations map to `ACL_POLICIES_SHOW`, `ACL_POLICIES_ADD`, and `AC
 5. WHEN a user requests a command preview for an ACL add or delete, THE ACL_Service SHALL build a Command_Preview from the matching static Command_Template and the submitted field values, and SHALL apply Redaction so the Execution_Credentials appear only as `***`.
 6. WHEN a user holding `ACL_POLICIES_ADD` confirms execution of a previewed ACL add, THE ACL_Service SHALL send the field payload (with the Correlation_Id and Execution_Credentials) to the N8N_Client and SHALL record the resulting ADD audit log with status SUCCESS or FAILED based on the n8n response.
 7. WHEN a user holding `ACL_POLICIES_DELETE` confirms execution of a previewed ACL delete, THE ACL_Service SHALL send the field payload (with the Correlation_Id and Execution_Credentials) to the N8N_Client and SHALL record the resulting DELETE audit log with status SUCCESS or FAILED.
-7a. WHEN an ACL ADD carries the optional `timeRange` unit, THE ACL_Service SHALL derive and append exactly the three keys `objectName`, `date`, and `time` (exact formats above) to the n8n ADD body, SHALL apply this ONLY to ADD (never DELETE or SHOW), and SHALL capture the raw `timeRange` values in the ADD audit request payload so a time-range add is auditable. WHEN an ACL ADD carries no `timeRange`, THE ACL_Service SHALL send the body unchanged (`{ user, pass, source, destination }`) and the Validation_Layer SHALL validate it exactly as a non-time-range ADD.
+7a. WHEN an ACL ADD carries the optional `timeRange` unit, THE ACL_Service SHALL branch on its `mode`: for `mode: 'new'` it SHALL derive and append exactly the three keys `objectName`, `date`, and `time` (exact formats above) to the n8n ADD body; for `mode: 'existing'` it SHALL append ONLY the chosen `objectName` (never a `date` or `time` key), so n8n reuses the already-defined on-device object. THE ACL_Service SHALL apply this ONLY to ADD (never DELETE or SHOW), and SHALL capture the raw `timeRange` (its `mode` and value) in the ADD audit request payload so either kind of time-range add is auditable. WHEN an ACL ADD carries no `timeRange`, THE ACL_Service SHALL send the body unchanged (`{ user, pass, source, destination }`) and the Validation_Layer SHALL validate it exactly as a non-time-range ADD.
 8. BEFORE executing an ACL add or delete, THE ACL_Service SHALL first verify the supplied `changeTicket` exists in iTop and SHALL reject the operation (writing no audit row) if the ticket is missing or iTop cannot be reached (specified in the ticketing-itop spec).
 9. THE ACL_Service SHALL send only the field payload required by n8n and SHALL NOT send the Command_Preview string to n8n.
 10. THE ACL_Service SHALL NOT persist any ACL configuration row; the only ACL persistence it performs is writing audit records.
@@ -141,7 +150,8 @@ The three route operations map to `ROUTES_SHOW`, `ROUTES_ADD`, and `ROUTES_DELET
 2. WHEN building a Command_Preview, THE NetOps_Policy_Manager SHALL substitute the submitted field values into the matching Command_Template; the templates do not interpolate credentials, and Redaction masks any credential value defensively.
 2a. THE Command_Templates SHALL mirror the device command lines n8n runs — the `echo "…"` steps inside a single `configure terminal … exit` block — WITHOUT the ssh/sshpass transport or any credential, using the fixed list name `KSEI-JMP` and n8n's fixed route next-hop + metric. The concrete shapes SHALL be:
    - **ACL add:** `configure terminal` / `access-list KSEI-JMP extended permit ip <src> <dst>` / `exit`.
-   - **ACL add + time range** (one ordered block): `configure terminal` / `time-range <objectName>` / `absolute end <time> <date>` / `access-list KSEI-JMP extended permit ip <src> <dst> time-range <objectName>` / `end` / `exit`.
+   - **ACL add + time range (new mode)** (one ordered block): `configure terminal` / `time-range <objectName>` / `absolute end <time> <date>` / `access-list KSEI-JMP extended permit ip <src> <dst> time-range <objectName>` / `end` / `exit`.
+   - **ACL add + time range (existing mode)** (the object already exists on the device, so NO definition lines and NO trailing `end`): `configure terminal` / `access-list KSEI-JMP extended permit ip <src> <dst> time-range <objectName>` / `exit`.
    - **ACL add bidirectional:** ONE block containing the forward permit line then the reverse permit line (same block, same time-range object when present).
    - **ACL delete:** `configure terminal` / `no access-list KSEI-JMP extended permit ip <src> <dst>` / `exit`.
    - **Route add:** `configure terminal` / `route KSEI-JMP <routeIp[ mask]> 192.197.120.1 1` / `exit`.

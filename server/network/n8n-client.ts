@@ -1,6 +1,13 @@
 import { loadEnv } from '../utils/config'
 import type { ConnectionTestResult } from '#shared/schemas/itop.schema'
 import type { Module, N8nResult, Operation } from '#shared/schemas/n8n.schema'
+import type { TimeRangeObject, TimeRangeUsage } from '#shared/schemas/time-range.schema'
+import {
+  N8nTimeShowResponseSchema,
+  N8nTimeUsageResponseSchema,
+  toTimeRangeObject,
+  toTimeRangeUsage,
+} from '#shared/schemas/time-range.schema'
 
 // The ONLY component that talks to n8n.
 //
@@ -134,6 +141,154 @@ export async function validateDeviceCredentials(
   catch (err) {
     const aborted = err instanceof Error && err.name === 'AbortError'
     return { success: false, message: aborted ? 'Validation request timed out' : 'Validation service is unreachable' }
+  }
+  finally {
+    clearTimeout(timeout)
+  }
+}
+
+export interface TimeShowResult {
+  /** True only when n8n returned a well-formed, successful response. */
+  ok: boolean
+  /** Mapped time-range objects — always `[]` on any failure. */
+  objects: TimeRangeObject[]
+  /** Safe, non-secret status message for logs/UI. */
+  message: string
+}
+
+/**
+ * Fetch the device's existing time-range objects from the read-only n8n
+ * `GET <N8N_BASE_URL>/time/show` webhook, for the ACL Add "Select Existing"
+ * dropdown. Mirrors `validateDeviceCredentials`' defensive style: bounded by
+ * N8N_TIMEOUT_MS, authenticated with the internal key header, tolerant of an
+ * array-wrapped body, validated with Zod — and it NEVER throws. On any
+ * network/timeout/parse/validation failure it resolves to
+ * `{ ok: false, objects: [], message }` so the caller can still return 200 and
+ * the page can fall back to "Create New". The API key is never logged.
+ */
+export async function fetchTimeRanges(): Promise<TimeShowResult> {
+  const env = loadEnv()
+  const base = env.N8N_BASE_URL.replace(/\/+$/, '')
+  const url = `${base}/time/show`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      method: 'GET',
+      signal: controller.signal,
+      headers: {
+        'X-NetOps-Internal-Key': env.N8N_API_KEY,
+      },
+    })
+
+    let body: unknown = null
+    try {
+      body = await res.json()
+    }
+    catch {
+      body = null
+    }
+
+    // n8n often wraps the webhook response in an array; unwrap the first element
+    // before validating, exactly like `normalize()` does for the POST path.
+    const root = Array.isArray(body) ? body[0] : body
+    const parsed = N8nTimeShowResponseSchema.safeParse(root)
+
+    if (!res.ok || !parsed.success) {
+      return { ok: false, objects: [], message: 'Could not load existing time ranges' }
+    }
+
+    const objects = parsed.data.data.map(toTimeRangeObject)
+    const message = typeof parsed.data.message === 'string'
+      ? parsed.data.message
+      : 'Time range objects retrieved'
+    return { ok: true, objects, message }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return {
+      ok: false,
+      objects: [],
+      message: aborted ? 'Time range request timed out' : 'n8n is unreachable',
+    }
+  }
+  finally {
+    clearTimeout(timeout)
+  }
+}
+
+export interface TimeUsageResult {
+  /** True only when n8n returned a well-formed, successful response. */
+  ok: boolean
+  /** Mapped per-object usage results — always `[]` on any failure. */
+  usages: TimeRangeUsage[]
+  /** Safe, non-secret status message for logs/UI. */
+  message: string
+}
+
+/**
+ * Ask n8n whether the given time-range object(s) are still used by any ACL rule,
+ * via the read-only `POST <N8N_BASE_URL>/time/isUsed` webhook. Used by the ACL
+ * DELETE "Generate" step to warn when deleting an ACL whose time-range object is
+ * still referenced by OTHER rules. Request body is
+ * `{ user, pass, timeObject: [names] }`; the device credentials come from the
+ * delete page and are NEVER logged. Mirrors `fetchTimeRanges`' defensive style:
+ * bounded by N8N_TIMEOUT_MS, array-body tolerant, Zod-validated, and it NEVER
+ * throws — on any failure it resolves to `{ ok: false, usages: [], message }`
+ * so the delete flow proceeds without the (advisory) warning.
+ */
+export async function checkTimeRangeUsage(
+  objectNames: string[],
+  creds: { username: string, password: string },
+): Promise<TimeUsageResult> {
+  const env = loadEnv()
+  const base = env.N8N_BASE_URL.replace(/\/+$/, '')
+  const url = `${base}/time/isUsed`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-NetOps-Internal-Key': env.N8N_API_KEY,
+      },
+      body: JSON.stringify({ user: creds.username, pass: creds.password, timeObject: objectNames }),
+    })
+
+    let body: unknown = null
+    try {
+      body = await res.json()
+    }
+    catch {
+      body = null
+    }
+
+    const root = Array.isArray(body) ? body[0] : body
+    const parsed = N8nTimeUsageResponseSchema.safeParse(root)
+
+    if (!res.ok || !parsed.success) {
+      return { ok: false, usages: [], message: 'Could not check time range usage' }
+    }
+
+    const usages = parsed.data.data.map(toTimeRangeUsage)
+    const message = typeof parsed.data.message === 'string'
+      ? parsed.data.message
+      : 'Time range usage checked'
+    return { ok: true, usages, message }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return {
+      ok: false,
+      usages: [],
+      message: aborted ? 'Time range usage request timed out' : 'n8n is unreachable',
+    }
   }
   finally {
     clearTimeout(timeout)
