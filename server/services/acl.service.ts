@@ -476,16 +476,35 @@ function reverseAclDirection(input: AclExecuteInput): AclExecuteInput {
 }
 
 /**
+ * Batch linkage stamped onto a bulk row's audit payload so the independent
+ * per-row audit rows of ONE bulk submission can be grouped together in the Log
+ * Trail. Absent for single/bidirectional (non-bulk) executes.
+ */
+interface AclBatchMeta {
+  /** Shared id for every row (and every direction) of one bulk submission. */
+  batchId: string
+  /** This row's 0-based position in the batch. */
+  batchIndex: number
+  /** Total rows in the batch. */
+  batchSize: number
+}
+
+/**
  * Run ONE ACL direction end-to-end: new correlation id → redacted preview →
  * n8n call (unchanged { user, pass, source, destination } contract, plus the
  * optional time-range keys) → one master audit row + one acl_logs detail row,
  * written atomically → client-facing result. A bidirectional ADD calls this
  * twice (forward then reverse), each independent with its own id and audit row.
+ *
+ * `batchMeta` (bulk only) is folded into the audit requestPayload so all rows of
+ * one bulk submission share a `batchId` for grouping; it never changes the n8n
+ * body or the client result.
  */
 async function runAclDirection(
   db: Database,
   ctx: AuditContext,
   input: AclExecuteInput,
+  batchMeta?: AclBatchMeta,
 ): Promise<OperationResult> {
   const correlationId = randomUUID()
   // Per-direction preview must show ONLY this direction's command lines; the
@@ -540,8 +559,10 @@ async function runAclDirection(
       correlationId,
       // redactPayload masks user/pass/exec*; the command snapshot is already
       // credential-free (preview never embeds creds). The RAW n8n request body
-      // (user/pass) is masked by record()'s deep redactPayload.
-      requestPayload: redactPayload({ ...input, n8nRequest: result.raw.request }),
+      // (user/pass) is masked by record()'s deep redactPayload. For a bulk row,
+      // the batch linkage (batchId/index/size) is stamped here so every row of
+      // one submission can be grouped in the Log Trail.
+      requestPayload: redactPayload({ ...input, ...(batchMeta ? { batch: batchMeta } : {}), n8nRequest: result.raw.request }),
       commandPayload: { command: preview.command },
       executionPayload: result.execution ?? null,
       responsePayload: {
@@ -823,14 +844,20 @@ export async function aclBulkExecute(
 
   // 3) All rows clean → execute each via the existing per-direction path. A row
   //    failing at the n8n call does NOT abort the batch; it is recorded FAILED.
+  //    One shared batchId stamps every row's audit payload (forward AND reverse)
+  //    so the whole submission can be grouped in the Log Trail while each row
+  //    keeps its own SUCCESS/FAILED row — partial failure stays fully visible.
+  const batchId = randomUUID()
+  const batchSize = corrected.length
   const rows: AclBulkExecuteRow[] = []
   let allOk = true
   for (let index = 0; index < corrected.length; index++) {
     const row = corrected[index]!
-    const forward = await runAclDirection(db, ctx, row)
+    const batchMeta = { batchId, batchIndex: index, batchSize }
+    const forward = await runAclDirection(db, ctx, row, batchMeta)
     let reverse: OperationResult | null = null
     if (row.operation === 'ADD' && row.bidirectional) {
-      reverse = await runAclDirection(db, ctx, reverseAclDirection(row))
+      reverse = await runAclDirection(db, ctx, reverseAclDirection(row), batchMeta)
     }
     if (forward.status !== 'SUCCESS' || (reverse && reverse.status !== 'SUCCESS')) {
       allOk = false
