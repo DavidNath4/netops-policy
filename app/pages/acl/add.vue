@@ -14,18 +14,39 @@ definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_ADD' })
 
 const api = useApi()
 
-// Existing on-device time-range objects for the "Select Existing" dropdown,
-// fetched once on mount. If the fetch fails the list stays empty and
-// `timeRangeLoadError` flips — the operator can still use "Create New".
+// Existing on-device time-range objects for the "Select Existing" dropdown.
+// The n8n `time/show` webhook now authenticates, so the catalog can no longer be
+// fetched on mount (no credentials yet) — it is loaded on demand once the Add
+// page's device credentials (Username + Password) are filled and the engineer
+// is in "Select Existing" mode. `timeRangeLoaded` guards against re-fetching the
+// same credentials repeatedly; a credential change invalidates it (see watcher).
 const timeRangeObjects = ref<TimeRangeObject[]>([])
 const timeRangeLoading = ref(false)
 const timeRangeLoadError = ref(false)
+const timeRangeLoaded = ref(false)
 
-onMounted(async () => {
+/** True once both device-credential fields are filled on this page. */
+const credsForTimeRangeFilled = computed(() =>
+  form.execUsername.trim() !== '' && form.execPassword !== '',
+)
+
+/**
+ * Load the on-device time-range catalog using the credentials typed on this
+ * page. No-op when credentials are missing or the catalog was already loaded for
+ * the current credentials. Never throws (server returns an empty list on any
+ * failure); `timeRangeLoadError` flips so the UI can suggest "Create New".
+ */
+async function loadTimeRanges() {
+  if (!credsForTimeRangeFilled.value || timeRangeLoaded.value || timeRangeLoading.value) return
   timeRangeLoading.value = true
+  timeRangeLoadError.value = false
   try {
-    const { objects } = await api.aclOps.timeRanges()
+    const { objects } = await api.aclOps.timeRanges({
+      execUsername: form.execUsername,
+      execPassword: form.execPassword,
+    })
     timeRangeObjects.value = objects
+    timeRangeLoaded.value = true
   }
   catch {
     timeRangeLoadError.value = true
@@ -33,7 +54,7 @@ onMounted(async () => {
   finally {
     timeRangeLoading.value = false
   }
-})
+}
 
 /** The end-detail line shown under each object name (fallback to raw config). */
 function timeRangeDetail(o: TimeRangeObject): string {
@@ -80,6 +101,9 @@ const form = reactive({
   // narrows what actually runs while the checkbox stays as the user set it.
   bidirectional: false,
 })
+
+// Seed execUsername/execPassword from the global head-bar credentials.
+useAutofillDeviceCreds(form)
 
 // Which direction(s) the generated preview covers and the next Execute will
 // send. Set by onGenerate from the four pre-check cases; a plain one-way ADD
@@ -219,6 +243,29 @@ watch(form, () => {
   resultDirections.value = null
   runPlan.value = 'forward'
 })
+
+// Device credentials drive the time-range fetch, so a credential change
+// invalidates the loaded catalog (it was fetched as a different engineer).
+// Clearing `timeRangeLoaded` lets the auto-load watcher re-fetch when both
+// fields are filled again.
+watch([() => form.execUsername, () => form.execPassword], () => {
+  timeRangeLoaded.value = false
+  timeRangeObjects.value = []
+  timeRangeLoadError.value = false
+})
+
+// Auto-load the catalog the moment the engineer is in "Select Existing" mode
+// (with the time range enabled) AND both credentials are filled. Running on
+// demand keeps credentials sourced from THIS page and avoids fetching for an
+// operator who only ever uses "Create New". `immediate` covers the case where
+// credentials are already filled when the mode is switched on.
+watch(
+  () => form.timeRangeEnabled && form.timeRangeMode === 'existing' && credsForTimeRangeFilled.value,
+  (ready) => {
+    if (ready) void loadTimeRanges()
+  },
+  { immediate: true },
+)
 
 // Block submit on malformed IPs (defense-in-depth; the server re-validates too).
 const ipsValid = computed(() =>
@@ -583,9 +630,11 @@ const inputClass
             </div>
 
             <!-- Select Existing: searchable combobox over the catalog loaded on
-                 mount. The search filters this in-memory list (name + detail) —
-                 it never hits the API again. The panel shows ~10 rows then
-                 scrolls (max-height on the content viewport). -->
+                 demand (once Username + Password are filled and this mode is
+                 active; the n8n time/show webhook now authenticates). The search
+                 filters this in-memory list (name + detail) — it never hits the
+                 API again. The panel shows ~10 rows then scrolls (max-height on
+                 the content viewport). -->
             <div v-if="form.timeRangeMode === 'existing'" class="flex flex-col gap-1">
               <USelectMenu
                 v-model="form.timeRangeObject"
@@ -612,7 +661,10 @@ const inputClass
                   </div>
                 </template>
               </USelectMenu>
-              <p v-if="timeRangeLoading" class="text-[11px] text-muted">
+              <p v-if="!credsForTimeRangeFilled" class="text-[11px] text-muted">
+                Isi Username &amp; Password dulu untuk memuat daftar time range dari perangkat.
+              </p>
+              <p v-else-if="timeRangeLoading" class="text-[11px] text-muted">
                 Loading existing time range objects...
               </p>
               <p v-else-if="timeRangeLoadError || timeRangeObjects.length === 0" class="text-[11px] text-muted">

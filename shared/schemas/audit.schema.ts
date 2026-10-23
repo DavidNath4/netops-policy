@@ -7,7 +7,7 @@ import { CorrelationIdSchema, PaginationQuerySchema } from './common.schema'
 // payloads are already redacted at write time, so they are safe to surface; they
 // are typed as unknown because their shape is intentionally flexible.
 
-export const AuditModuleSchema = z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N'])
+export const AuditModuleSchema = z.enum(['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N', 'TIME_RANGE'])
 export type AuditModule = z.infer<typeof AuditModuleSchema>
 
 export const AuditActionSchema = z.enum(['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY'])

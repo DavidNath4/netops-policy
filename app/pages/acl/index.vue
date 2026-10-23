@@ -11,8 +11,9 @@ const { can } = usePermissions()
 const canAdd = computed(() => can('ACL_POLICIES_ADD'))
 const canDelete = computed(() => can('ACL_POLICIES_DELETE'))
 
-const { isSet, status, ensureLoaded, clear } = useDeviceCredentials()
-const credModalOpen = ref(false)
+// Device credentials are now set GLOBALLY from the head bar; this page only
+// reads the status to gate search and surface a hint when they're missing.
+const { isSet, ensureLoaded } = useDeviceCredentials()
 
 const search = ref('')
 const loading = ref(false)
@@ -22,31 +23,59 @@ const searched = ref(false)
 
 onMounted(ensureLoaded)
 
-// Structured ACL rows from n8n (acl/show returns { data: [...] }).
-interface AclEndpoint { type?: string, value?: string }
+// Structured ACL rows from n8n (acl/show returns { data: [...] }). The live
+// contract uses snake_case fields (`raw_command`, `acl_name`, `time_range`, and
+// endpoints with `subnet_mask`); older camelCase keys are tolerated as a
+// fallback so a response in either shape renders.
+interface AclEndpoint { type?: string, value?: string, subnet_mask?: string | null }
 interface AclRow {
+  raw_command?: string
   raw?: string
+  acl_name?: string
   aclName?: string
   action?: string
   protocol?: string
   source?: AclEndpoint
   destination?: AclEndpoint
   service?: string | null
+  time_range?: string | null
 }
 
 const items = computed<AclRow[]>(() => (result.value?.items as AclRow[] | null) ?? [])
 const hasItems = computed(() => items.value.length > 0)
 
+function rawCommand(row: AclRow): string | null {
+  return row.raw_command ?? row.raw ?? null
+}
+
+// Render an endpoint's address only (no mask). Object/type prefixes such as
+// "object KSEI-PROD" are preserved; a plain host/network shows just its value.
 function endpoint(e?: AclEndpoint): string {
-  if (!e) return '—'
-  return e.type && e.type !== 'host' ? `${e.type} ${e.value ?? ''}`.trim() : (e.value ?? '—')
+  if (!e || !e.value) return '—'
+  return e.type && e.type !== 'host' ? `${e.type} ${e.value}`.trim() : e.value
+}
+
+// Subnet mask for its own column. Shown only when meaningful: a `host` entry or
+// a /32 mask is a single address, so the redundant 255.255.255.255 is left
+// blank. Objects carry no mask, so they also stay blank.
+const HOST_MASK = '255.255.255.255'
+function endpointMask(e?: AclEndpoint): string {
+  if (!e || !e.subnet_mask || e.subnet_mask === HOST_MASK || e.type === 'host') return ''
+  return e.subnet_mask
+}
+
+// Time range column: show the object name when the rule carries one, otherwise
+// leave it blank (the user asked for an empty cell, not a dash).
+function timeRange(row: AclRow): string {
+  return row.time_range ?? ''
 }
 
 // Selected row → its raw command (shown in a RawCommandBox above the table).
 const selectedIndex = ref<number | null>(null)
 const selectedRaw = computed(() => {
   if (selectedIndex.value === null) return null
-  return items.value[selectedIndex.value]?.raw ?? null
+  const row = items.value[selectedIndex.value]
+  return row ? rawCommand(row) : null
 })
 
 function selectRow(i: number) {
@@ -55,12 +84,11 @@ function selectRow(i: number) {
 
 // Table columns for the scrollable result table.
 const tableColumns = [
-  { key: 'aclName', label: 'ACL Name', width: '1.2fr' },
-  { key: 'action', label: 'Action', width: '0.8fr' },
-  { key: 'protocol', label: 'Protocol', width: '0.8fr' },
   { key: 'source', label: 'Source', width: '1.4fr' },
+  { key: 'sourceMask', label: 'Source Subnet Mask', width: '1.2fr' },
   { key: 'destination', label: 'Destination', width: '1.4fr' },
-  { key: 'service', label: 'Service', width: '1fr' },
+  { key: 'destinationMask', label: 'Destination Subnet Mask', width: '1.2fr' },
+  { key: 'timeRange', label: 'Time Range', width: '1.1fr' },
 ]
 
 // Reset the selection whenever a new search result arrives.
@@ -76,9 +104,9 @@ async function runSearch() {
     return
   }
 
-  // Gate: need device credentials first.
+  // Gate: need device credentials first — now set from the head bar.
   if (!isSet.value) {
-    credModalOpen.value = true
+    error.value = 'Set your device credentials from the key icon in the top bar, then search.'
     return
   }
 
@@ -92,7 +120,7 @@ async function runSearch() {
     const code = (e as { data?: { error?: { code?: string } } })?.data?.error?.code
     if (code === 'DEVICE_CREDENTIALS_REQUIRED') {
       await ensureLoaded()
-      credModalOpen.value = true
+      error.value = 'Your device credentials expired. Set them again from the key icon in the top bar.'
       result.value = null
     }
     else {
@@ -103,15 +131,6 @@ async function runSearch() {
   finally {
     loading.value = false
   }
-}
-
-// After saving credentials in the modal, run the pending search automatically.
-function onCredsSaved() {
-  void runSearch()
-}
-
-async function onClearCreds() {
-  await clear()
 }
 </script>
 
@@ -137,38 +156,6 @@ async function onClearCreds() {
         </NuxtLink>
       </template>
     </PageHeader>
-
-    <!-- Device credential status -->
-    <div class="flex items-center justify-between gap-3 rounded-lg border border-line bg-panel px-4 py-2.5 text-xs">
-      <div class="flex items-center gap-2">
-        <UIcon
-          :name="isSet ? 'i-lucide-key-round' : 'i-lucide-key-round'"
-          class="size-4"
-          :class="isSet ? 'text-ok' : 'text-muted'"
-        />
-        <span v-if="isSet" class="text-ink">
-          Device credentials set<span v-if="status.username" class="text-muted"> ({{ status.username }})</span>
-        </span>
-        <span v-else class="text-muted">No device credentials set for this session</span>
-      </div>
-      <div class="flex items-center gap-2">
-        <button
-          type="button"
-          class="rounded-[5px] border border-line px-3 py-1 font-semibold text-ink transition-colors hover:bg-surface"
-          @click="credModalOpen = true"
-        >
-          {{ isSet ? 'Update' : 'Set credentials' }}
-        </button>
-        <button
-          v-if="isSet"
-          type="button"
-          class="rounded-[5px] border border-line px-3 py-1 font-semibold text-bad transition-colors hover:bg-surface"
-          @click="onClearCreds"
-        >
-          Clear
-        </button>
-      </div>
-    </div>
 
     <!-- Search bar -->
     <form
@@ -235,12 +222,11 @@ async function onClearCreds() {
         @select="selectRow"
       >
         <template #cell="{ row }">
-          <span class="truncate">{{ (row as AclRow).aclName ?? '—' }}</span>
-          <span class="truncate" :class="(row as AclRow).action === 'permit' ? 'text-ok' : (row as AclRow).action === 'deny' ? 'text-bad' : ''">{{ (row as AclRow).action ?? '—' }}</span>
-          <span class="truncate">{{ (row as AclRow).protocol ?? '—' }}</span>
           <span class="truncate">{{ endpoint((row as AclRow).source) }}</span>
+          <span class="truncate text-muted">{{ endpointMask((row as AclRow).source) }}</span>
           <span class="truncate">{{ endpoint((row as AclRow).destination) }}</span>
-          <span class="truncate">{{ (row as AclRow).service ?? '—' }}</span>
+          <span class="truncate text-muted">{{ endpointMask((row as AclRow).destination) }}</span>
+          <span class="truncate text-muted">{{ timeRange(row as AclRow) }}</span>
         </template>
       </ScrollableResultTable>
       
@@ -262,7 +248,5 @@ async function onClearCreds() {
       title="Search ACLs"
       description="Enter an IP address above to look up ACL entries on the device."
     />
-
-    <DeviceCredentialsModal v-model="credModalOpen" @saved="onCredsSaved" />
   </div>
 </template>

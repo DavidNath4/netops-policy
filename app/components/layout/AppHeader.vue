@@ -9,6 +9,23 @@
 const { toggleMobile } = useSidebar()
 const { user, logout } = useAuth()
 
+// Global Device Session Credentials — one place to set them (this head bar),
+// auto-filled everywhere. The chip shows the status + a live countdown; when the
+// TTL elapses the modal re-opens to prompt for fresh credentials.
+const { isActive, isExpired, countdown, status, ensureLoaded } = useDeviceCredentials()
+const credModalOpen = ref(false)
+onMounted(ensureLoaded)
+
+// When the countdown hits zero (creds just expired), re-prompt automatically —
+// but only once per expiry and not while the user already has the modal open.
+const wasExpired = ref(false)
+watch(isExpired, (expired) => {
+  if (expired && !wasExpired.value && !credModalOpen.value) {
+    credModalOpen.value = true
+  }
+  wasExpired.value = expired
+})
+
 // Display name of the authenticated user (falls back to email local-part).
 const displayName = computed(() => {
   const u = user.value
@@ -58,6 +75,28 @@ async function onLogout() {
     </h1>
 
     <div class="ml-auto flex items-center gap-2 sm:gap-3">
+      <!-- Global device credentials: status + live TTL countdown. Click to set
+           or update; the chip turns amber when expired/unset. Auto-filled into
+           every device call and credential form. -->
+      <button
+        type="button"
+        class="flex h-9 items-center gap-2 rounded-md border px-2.5 text-xs font-medium transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-brand"
+        :class="isActive
+          ? 'border-line text-ink hover:bg-black/5'
+          : 'border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100'"
+        :aria-label="isActive
+          ? `Device credentials set${status.username ? ` for ${status.username}` : ''}, expires in ${countdown}`
+          : 'Set device credentials'"
+        @click="credModalOpen = true"
+      >
+        <UIcon name="i-lucide-key-round" class="size-4 shrink-0" />
+        <template v-if="isActive">
+          <span class="hidden sm:inline">{{ status.username ?? 'Device creds' }}</span>
+          <span class="font-mono tabular-nums text-muted">{{ countdown }}</span>
+        </template>
+        <span v-else class="whitespace-nowrap">Set credentials</span>
+      </button>
+
       <!-- Notifications: bell with an unread indicator -->
       <button
         type="button"
@@ -99,6 +138,7 @@ async function onLogout() {
     </div>
 
     <!-- Modals -->
+    <DeviceCredentialsModal v-model="credModalOpen" />
     <LayoutNotificationModal v-model:open="notifOpen" :count="notificationCount" />
     <LayoutProfileModal v-model:open="profileOpen" />
     <LayoutLogoutNotificationModal

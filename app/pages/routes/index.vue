@@ -12,8 +12,9 @@ const { can } = usePermissions()
 const canAdd = computed(() => can('ROUTES_ADD'))
 const canDelete = computed(() => can('ROUTES_DELETE'))
 
-const { isSet, status, ensureLoaded, clear } = useDeviceCredentials()
-const credModalOpen = ref(false)
+// Device credentials are now set GLOBALLY from the head bar; this page only
+// reads the status to gate the fetch and surface a hint when they're missing.
+const { isSet, ensureLoaded } = useDeviceCredentials()
 
 const search = ref('')
 const loading = ref(false)
@@ -72,7 +73,7 @@ watch(items, () => {
 async function loadRoutes() {
   error.value = null
   if (!isSet.value) {
-    credModalOpen.value = true
+    error.value = 'Set your device credentials from the key icon in the top bar, then refresh.'
     return
   }
 
@@ -87,7 +88,7 @@ async function loadRoutes() {
     const code = (e as { data?: { error?: { code?: string } } })?.data?.error?.code
     if (code === 'DEVICE_CREDENTIALS_REQUIRED') {
       await ensureLoaded()
-      credModalOpen.value = true
+      error.value = 'Your device credentials expired. Set them again from the key icon in the top bar.'
       result.value = null
     }
     else {
@@ -101,21 +102,14 @@ async function loadRoutes() {
 }
 
 // On load: make sure creds are known, then fetch all routes if we have them.
+// A credential change in the head bar auto-loads once creds become available.
 onMounted(async () => {
   await ensureLoaded()
   if (isSet.value) await loadRoutes()
 })
-
-// After saving credentials in the modal, load the routes.
-function onCredsSaved() {
-  void loadRoutes()
-}
-
-async function onClearCreds() {
-  await clear()
-  result.value = null
-  loaded.value = false
-}
+watch(isSet, (set) => {
+  if (set && !loaded.value) void loadRoutes()
+})
 </script>
 
 <template>
@@ -141,52 +135,28 @@ async function onClearCreds() {
       </template>
     </PageHeader>
 
-    <div class="flex items-center justify-between gap-3 rounded-lg border border-line bg-panel px-4 py-2.5 text-xs">
-      <div class="flex items-center gap-2">
-        <UIcon name="i-lucide-key-round" class="size-4" :class="isSet ? 'text-ok' : 'text-muted'" />
-        <span v-if="isSet" class="text-ink">
-          Device credentials set<span v-if="status.username" class="text-muted"> ({{ status.username }})</span>
-        </span>
-        <span v-else class="text-muted">No device credentials set for this session</span>
+    <!-- Client-side filter of the fetched routes + a Refresh action. Device
+         credentials are set globally from the head bar. -->
+    <div class="flex flex-col gap-1.5 rounded-lg border border-line bg-panel p-4 sm:flex-row sm:items-end">
+      <div class="flex flex-col gap-1.5 sm:flex-1">
+        <label for="route-search" class="text-[11px] font-semibold text-muted">Filter results</label>
+        <input
+          id="route-search"
+          v-model="search"
+          type="text"
+          placeholder="Filter by destination, mask, or gateway…"
+          class="h-7 rounded-[5px] border border-line bg-panel px-2.5 text-xs text-ink outline-none focus:border-brand"
+        >
       </div>
-      <div class="flex items-center gap-2">
-        <button
-          v-if="isSet"
-          type="button"
-          class="inline-flex items-center gap-1 rounded-[5px] border border-line px-3 py-1 font-semibold text-ink transition-colors hover:bg-surface"
-          @click="loadRoutes"
-        >
-          <UIcon name="i-lucide-refresh-cw" class="size-3.5" />
-          Refresh
-        </button>
-        <button
-          type="button"
-          class="rounded-[5px] border border-line px-3 py-1 font-semibold text-ink transition-colors hover:bg-surface"
-          @click="credModalOpen = true"
-        >
-          {{ isSet ? 'Update' : 'Set credentials' }}
-        </button>
-        <button
-          v-if="isSet"
-          type="button"
-          class="rounded-[5px] border border-line px-3 py-1 font-semibold text-bad transition-colors hover:bg-surface"
-          @click="onClearCreds"
-        >
-          Clear
-        </button>
-      </div>
-    </div>
-
-    <!-- Client-side filter of the fetched routes -->
-    <div class="flex flex-col gap-1.5 rounded-lg border border-line bg-panel p-4">
-      <label for="route-search" class="text-[11px] font-semibold text-muted">Filter results</label>
-      <input
-        id="route-search"
-        v-model="search"
-        type="text"
-        placeholder="Filter by destination, mask, or gateway…"
-        class="h-7 rounded-[5px] border border-line bg-panel px-2.5 text-xs text-ink outline-none focus:border-brand"
+      <button
+        type="button"
+        :disabled="!isSet || loading"
+        class="inline-flex h-7 items-center gap-1 rounded-[5px] border border-line px-3 text-xs font-semibold text-ink transition-colors hover:bg-surface disabled:opacity-60"
+        @click="loadRoutes"
       >
+        <UIcon name="i-lucide-refresh-cw" class="size-3.5" :class="{ 'animate-spin': loading }" />
+        Refresh
+      </button>
     </div>
 
     <UAlert
@@ -243,9 +213,7 @@ async function onClearCreds() {
       v-else
       icon="i-lucide-key-round"
       title="Set device credentials"
-      description="Set your device credentials to load the route table."
+      description="Set your device credentials from the key icon in the top bar to load the route table."
     />
-
-    <DeviceCredentialsModal v-model="credModalOpen" @saved="onCredsSaved" />
   </div>
 </template>

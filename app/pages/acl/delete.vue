@@ -27,6 +27,9 @@ const form = reactive({
   execPassword: '',
 })
 
+// Seed execUsername/execPassword from the global head-bar credentials.
+useAutofillDeviceCreds(form)
+
 const showPassword = ref(false)
 
 // Change ticket is picked from iTop (read-only); form.changeTicket holds the

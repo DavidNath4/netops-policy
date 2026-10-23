@@ -57,7 +57,9 @@ const allLinks: NavLink[] = [
     children: [
       { label: 'Show ACL', to: '/acl', icon: 'i-lucide-list', permission: 'ACL_POLICIES_SHOW' },
       { label: 'Add ACL', to: '/acl/add', icon: 'i-lucide-shield-plus', permission: 'ACL_POLICIES_ADD' },
+      { label: 'Bulk Add ACL', to: '/acl/add-bulk', icon: 'i-lucide-layers', permission: 'ACL_POLICIES_ADD' },
       { label: 'Delete ACL', to: '/acl/delete', icon: 'i-lucide-shield-off', permission: 'ACL_POLICIES_DELETE' },
+      { label: 'Time Range', to: '/acl/time-range', icon: 'i-lucide-clock', permission: 'ACL_POLICIES_SHOW' },
     ],
   },
   {

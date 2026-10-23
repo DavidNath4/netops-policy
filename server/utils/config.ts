@@ -71,6 +71,15 @@ export const EnvSchema = z.object({
     .int()
     .positive('MFA_CHALLENGE_TTL_MINUTES must be a positive integer')
     .default(5),
+  // Lifetime of the global Device Session Credentials, in minutes. After this
+  // window `getDeviceCredentials` treats them as expired (clears them and
+  // returns null, so the next device call asks for fresh credentials). The head
+  // bar shows a countdown from the returned `expiresAt`. Server-only.
+  DEVICE_CRED_TTL_MINUTES: z.coerce
+    .number()
+    .int()
+    .positive('DEVICE_CRED_TTL_MINUTES must be a positive integer')
+    .default(30),
 
   // -------------------------------------------------------------------------
   // Active Directory (AD / LDAP) authentication. See .kiro/specs/ad-authentication.

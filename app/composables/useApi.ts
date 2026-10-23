@@ -13,10 +13,10 @@ import type {
   RoleOption,
   UpdateUserInput,
 } from '~/utils/api-types'
-import type { AclExecuteInput, AclPreviewInput } from '#shared/schemas/acl.schema'
-import type { TimeRangeList, TimeRangeUsageList } from '#shared/schemas/time-range.schema'
+import type { AclBulkExecuteInput, AclBulkPreviewInput, AclExecuteInput, AclPreviewInput } from '#shared/schemas/acl.schema'
+import type { TimeRangeAddInput, TimeRangeAddResult, TimeRangeDeleteInput, TimeRangeDeleteResult, TimeRangeList, TimeRangeOverviewList, TimeRangeUsageList } from '#shared/schemas/time-range.schema'
 import type { RouteExecuteInput, RoutePreviewInput } from '#shared/schemas/route.schema'
-import type { DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8n.schema'
+import type { AclBulkExecuteResult, AclBulkPreviewResult, DeviceCredentialsInput, OperationResult } from '#shared/schemas/n8n.schema'
 import type { AuditResponse } from '#shared/schemas/audit.schema'
 import type { AclLogResponse, RouteLogResponse } from '#shared/schemas/exec-log.schema'
 import type { ConnectionTestResult, ItopTicketDetail, ItopTicketSummary } from '#shared/schemas/itop.schema'
@@ -117,9 +117,22 @@ export function useApi() {
       execute(input: AclExecuteInput): Promise<OperationResult> {
         return apiSend<OperationResult>('/api/acl/execute', 'POST', input)
       },
+      // Bulk ADD: classify every row (NEW/EXISTS) + per-row command preview.
+      // Runs an authenticated acl/show pre-check per row; no audit, no execute.
+      bulkPreview(input: AclBulkPreviewInput): Promise<AclBulkPreviewResult> {
+        return apiSend<AclBulkPreviewResult>('/api/acl/bulk-preview', 'POST', input)
+      },
+      // Bulk ADD execute: all-or-nothing gate server-side (409 when any row is
+      // blocking), otherwise runs every row and returns a per-row result.
+      bulkExecute(input: AclBulkExecuteInput): Promise<AclBulkExecuteResult> {
+        return apiSend<AclBulkExecuteResult>('/api/acl/bulk-execute', 'POST', input)
+      },
       // Existing on-device time-range objects for the Add page "Select Existing".
-      timeRanges(): Promise<TimeRangeList> {
-        return apiGet<TimeRangeList>('/api/acl/time-ranges')
+      // `creds` are the device credentials typed on the Add page: the n8n
+      // `time/show` webhook now authenticates, so they are POSTed (never in the
+      // URL/logs). Never throws server-side — empty `objects` on failure.
+      timeRanges(creds: { execUsername: string, execPassword: string }): Promise<TimeRangeList> {
+        return apiSend<TimeRangeList>('/api/acl/time-ranges', 'POST', creds)
       },
       // Check (for the DELETE flow) whether the given time-range object(s) are
       // still used by other ACL rules. `creds` are the device credentials typed
@@ -129,6 +142,26 @@ export function useApi() {
         creds: { execUsername: string, execPassword: string },
       ): Promise<TimeRangeUsageList> {
         return apiSend<TimeRangeUsageList>('/api/acl/time-range-usage', 'POST', { objectNames, ...creds })
+      },
+      // Time Range page: every device time-range object + end detail + ACL-rule
+      // usage (name/count/raw commands), in one read. Credentials are auto-filled
+      // from the Device Session Credentials (no creds in the body).
+      timeRangeOverview(): Promise<TimeRangeOverviewList> {
+        return apiSend<TimeRangeOverviewList>('/api/acl/time-range-overview', 'POST')
+      },
+      // Time Range page: display-only command preview for a create (no n8n).
+      timeRangePreview(input: TimeRangeAddInput): Promise<{ preview: string, command: string[] }> {
+        return apiSend<{ preview: string, command: string[] }>('/api/acl/time-range-preview', 'POST', input)
+      },
+      // Time Range page: create a standalone time-range object via n8n time/add.
+      // Credentials auto-filled from the Device Session Credentials.
+      timeRangeAdd(input: TimeRangeAddInput): Promise<TimeRangeAddResult> {
+        return apiSend<TimeRangeAddResult>('/api/acl/time-range-add', 'POST', input)
+      },
+      // Time Range page: safely delete an object via n8n time/safeDelete. Refused
+      // (with blockingRules) when ACL rules still use it. ACL_POLICIES_DELETE.
+      timeRangeDelete(input: TimeRangeDeleteInput): Promise<TimeRangeDeleteResult> {
+        return apiSend<TimeRangeDeleteResult>('/api/acl/time-range-delete', 'POST', input)
       },
     },
 
@@ -150,8 +183,8 @@ export function useApi() {
 
     // Device Session Credentials (read-path convenience for ACL/Route search).
     deviceCredentials: {
-      status(): Promise<{ set: boolean, username?: string }> {
-        return apiGet<{ set: boolean, username?: string }>('/api/session/device-credentials')
+      status(): Promise<{ set: boolean, username?: string, expiresAt?: string }> {
+        return apiGet<{ set: boolean, username?: string, expiresAt?: string }>('/api/session/device-credentials')
       },
       set(input: DeviceCredentialsInput): Promise<{ set: boolean }> {
         return apiSend<{ set: boolean }>('/api/session/device-credentials', 'POST', input)

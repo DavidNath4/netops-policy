@@ -158,15 +158,20 @@ export interface TimeShowResult {
 
 /**
  * Fetch the device's existing time-range objects from the read-only n8n
- * `GET <N8N_BASE_URL>/time/show` webhook, for the ACL Add "Select Existing"
- * dropdown. Mirrors `validateDeviceCredentials`' defensive style: bounded by
- * N8N_TIMEOUT_MS, authenticated with the internal key header, tolerant of an
- * array-wrapped body, validated with Zod — and it NEVER throws. On any
- * network/timeout/parse/validation failure it resolves to
- * `{ ok: false, objects: [], message }` so the caller can still return 200 and
- * the page can fall back to "Create New". The API key is never logged.
+ * `POST <N8N_BASE_URL>/time/show` webhook, for the ACL Add "Select Existing"
+ * dropdown. The webhook now authenticates like the other n8n calls: the request
+ * body carries the per-engineer device credentials (`{ user, pass }`) typed on
+ * the ACL Add page — NOT the internal key alone. Mirrors `checkTimeRangeUsage`'
+ * defensive style: bounded by N8N_TIMEOUT_MS, authenticated with the internal
+ * key header + credential body, tolerant of an array-wrapped body, validated
+ * with Zod — and it NEVER throws. On any network/timeout/parse/validation
+ * failure it resolves to `{ ok: false, objects: [], message }` so the caller can
+ * still return 200 and the page can fall back to "Create New". The credentials
+ * and the API key are never logged.
  */
-export async function fetchTimeRanges(): Promise<TimeShowResult> {
+export async function fetchTimeRanges(
+  creds: { username: string, password: string },
+): Promise<TimeShowResult> {
   const env = loadEnv()
   const base = env.N8N_BASE_URL.replace(/\/+$/, '')
   const url = `${base}/time/show`
@@ -176,11 +181,13 @@ export async function fetchTimeRanges(): Promise<TimeShowResult> {
 
   try {
     const res = await fetch(url, {
-      method: 'GET',
+      method: 'POST',
       signal: controller.signal,
       headers: {
+        'Content-Type': 'application/json',
         'X-NetOps-Internal-Key': env.N8N_API_KEY,
       },
+      body: JSON.stringify({ user: creds.username, pass: creds.password }),
     })
 
     let body: unknown = null
@@ -288,6 +295,180 @@ export async function checkTimeRangeUsage(
       ok: false,
       usages: [],
       message: aborted ? 'Time range usage request timed out' : 'n8n is unreachable',
+    }
+  }
+  finally {
+    clearTimeout(timeout)
+  }
+}
+
+export interface TimeAddResult {
+  /** True only when n8n returned a well-formed, successful response. */
+  ok: boolean
+  /** Safe, non-secret status message for logs/UI. */
+  message: string
+  /** True when n8n reported the object already exists (error OBJECT_ALREADY_EXISTS). */
+  alreadyExists: boolean
+}
+
+/**
+ * Create a STANDALONE time-range object on the device via the n8n
+ * `POST <N8N_BASE_URL>/time/add` webhook (the Time Range page "Add" form). The
+ * request body is `{ user, pass, objectName, date, time }` — the SAME three
+ * derived keys an ACL ADD "Create New" time range already sends, so n8n runs the
+ * same `time-range <objectName>` / `absolute end <time> <date>` block without a
+ * permit line. Device credentials come from the caller's Device Session
+ * Credentials and are NEVER logged.
+ *
+ * Unlike the read-only helpers, a create must report real success/failure, so
+ * this DOES surface `ok: false` with n8n's message (e.g. a device-side duplicate
+ * name) — but it still NEVER throws: on any network/timeout/parse failure it
+ * resolves to `{ ok: false, message }` so the handler returns a safe error.
+ */
+export async function addTimeRange(
+  payload: { objectName: string, date: string, time: string },
+  creds: { username: string, password: string },
+): Promise<TimeAddResult> {
+  const env = loadEnv()
+  const base = env.N8N_BASE_URL.replace(/\/+$/, '')
+  const url = `${base}/time/add`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-NetOps-Internal-Key': env.N8N_API_KEY,
+      },
+      body: JSON.stringify({
+        user: creds.username,
+        pass: creds.password,
+        objectName: payload.objectName,
+        date: payload.date,
+        time: payload.time,
+      }),
+    })
+
+    let body: unknown = null
+    try {
+      body = await res.json()
+    }
+    catch {
+      body = null
+    }
+
+    const root = Array.isArray(body) ? body[0] : body
+    const b = (root && typeof root === 'object' ? root : {}) as Record<string, unknown>
+    const success = res.ok && b.success === true
+    const errorCode = typeof b.error === 'string' ? b.error : undefined
+    // On failure prefer the specific `message` (e.g. "Time-range object already
+    // exists", "Invalid time. Expected HH:mm"), then the error code, then a
+    // generic fallback. `message` is a safe, non-secret string from n8n.
+    const message = typeof b.message === 'string' && b.message.trim() !== ''
+      ? b.message
+      : (success ? 'Time range created' : (errorCode ?? 'Could not create the time range'))
+
+    return { ok: success, message, alreadyExists: errorCode === 'OBJECT_ALREADY_EXISTS' }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return { ok: false, message: aborted ? 'Time range add request timed out' : 'n8n is unreachable', alreadyExists: false }
+  }
+  finally {
+    clearTimeout(timeout)
+  }
+}
+
+export interface TimeDeleteResult {
+  /** True only when n8n deleted AND verified the object was removed. */
+  ok: boolean
+  /** Safe, non-secret status message for logs/UI. */
+  message: string
+  /** True when n8n refused because the object is still used by ACL rules. */
+  inUse: boolean
+  /** The ACL rules still using the object (only when refused for in-use). */
+  blockingRules: { aclName: string | null, rawRule: string }[]
+  /** Raw parsed n8n response (for the audit payload). */
+  raw: unknown
+}
+
+/**
+ * Safely delete a standalone time-range object via the n8n
+ * `POST <N8N_BASE_URL>/time/safeDelete` webhook (the Time Range page row "Delete").
+ * n8n re-checks the device for ACL rules referencing the object and REFUSES when
+ * any still use it (returning `{ aclName, rawRule }[]` in `data`), so a rule is
+ * never orphaned. Request body is `{ user, pass, objectName }`; the device
+ * credentials come from the Device Session Credentials and are NEVER logged.
+ *
+ * Reports real success/failure but NEVER throws: on any network/timeout/parse
+ * failure it resolves to `{ ok: false, ... }` so the handler returns a safe error.
+ */
+export async function safeDeleteTimeRange(
+  objectName: string,
+  creds: { username: string, password: string },
+): Promise<TimeDeleteResult> {
+  const env = loadEnv()
+  const base = env.N8N_BASE_URL.replace(/\/+$/, '')
+  const url = `${base}/time/safeDelete`
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), env.N8N_TIMEOUT_MS)
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-NetOps-Internal-Key': env.N8N_API_KEY,
+      },
+      body: JSON.stringify({ user: creds.username, pass: creds.password, objectName }),
+    })
+
+    let body: unknown = null
+    try {
+      body = await res.json()
+    }
+    catch {
+      body = null
+    }
+
+    const root = Array.isArray(body) ? body[0] : body
+    const b = (root && typeof root === 'object' ? root : {}) as Record<string, unknown>
+    const success = res.ok && b.success === true
+    const errorCode = typeof b.error === 'string' ? b.error : undefined
+    const inUse = errorCode === 'OBJECT_IN_USE'
+
+    // On an in-use refusal, n8n returns the blocking rules in `data` as
+    // `{ aclName, rawRule }`. On success `data` holds `{ objectName }`, which we
+    // ignore here. Extract only well-formed blocking rows.
+    const data = Array.isArray(b.data) ? b.data : []
+    const blockingRules = data
+      .map((row) => {
+        const r = (row && typeof row === 'object' ? row : {}) as Record<string, unknown>
+        if (typeof r.rawRule !== 'string') return null
+        return { aclName: typeof r.aclName === 'string' ? r.aclName : null, rawRule: r.rawRule }
+      })
+      .filter((r): r is { aclName: string | null, rawRule: string } => r !== null)
+
+    const message = typeof b.message === 'string' && b.message.trim() !== ''
+      ? b.message
+      : (success ? 'Time range deleted' : (errorCode ?? 'Could not delete the time range'))
+
+    return { ok: success, message, inUse, blockingRules, raw: body }
+  }
+  catch (err) {
+    const aborted = err instanceof Error && err.name === 'AbortError'
+    return {
+      ok: false,
+      message: aborted ? 'Time range delete request timed out' : 'n8n is unreachable',
+      inUse: false,
+      blockingRules: [],
+      raw: null,
     }
   }
   finally {

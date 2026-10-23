@@ -121,6 +121,49 @@ export function renderAclDelete(f: AclDeleteInput): string[] {
   ]
 }
 
+/**
+ * TIME RANGE ADD preview — the standalone time-range object block n8n runs for
+ * the Time Range page "Add" (the creation lines only, no ssh/credentials):
+ *
+ *   configure terminal
+ *   time-range <objectName>
+ *   absolute end <time> <date>
+ *   end
+ *   exit
+ *
+ * `objectName`/`date`/`time` are the already-derived wire values (dd-mmm-yyyy
+ * auto name or a typed name; date as "30 October 2026"; time as "HH:mm"). The
+ * `absolute end …` line is n8n's `asaCommand`.
+ */
+export function renderTimeRangeAdd(f: { objectName: string, date: string, time: string }): string[] {
+  return [
+    'configure terminal',
+    `time-range ${f.objectName}`,
+    `absolute end ${f.time} ${f.date}`,
+    'end',
+    'exit',
+  ]
+}
+
+/**
+ * TIME RANGE DELETE preview — the standalone object removal block (no ssh/creds):
+ *
+ *   configure terminal
+ *   no time-range <objectName>
+ *   end
+ *   exit
+ *
+ * Display/audit only; n8n's safeDelete also verifies the object is gone.
+ */
+export function renderTimeRangeDelete(objectName: string): string[] {
+  return [
+    'configure terminal',
+    `no time-range ${objectName}`,
+    'end',
+    'exit',
+  ]
+}
+
 /** ROUTE ADD preview — `route KSEI-JMP <ip[ mask]> 192.197.120.1 1`. */
 export function renderRouteAdd(f: RouteAddInput): string[] {
   const route = joinAddr(f.routeIp, f.routeMask)

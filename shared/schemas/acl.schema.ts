@@ -170,3 +170,68 @@ export type AclPreviewInput = z.infer<typeof AclPreviewSchema>
 /** Execute request: same shape as preview, but the server executes via n8n. */
 export const AclExecuteSchema = AclPreviewSchema
 export type AclExecuteInput = z.infer<typeof AclExecuteSchema>
+
+// ---------------------------------------------------------------------------
+// BULK ADD ACL
+// ---------------------------------------------------------------------------
+// Add several source<->destination pairs in ONE batch under ONE iTop ticket and
+// ONE set of device credentials. Bulk is NOT a new n8n contract: the service
+// loops the existing per-direction `acl/add` call (exactly as the bidirectional
+// ADD already does), so each direction keeps its own correlation id and audit
+// row. Only ADD is bulk-able (SHOW/DELETE are untouched).
+
+/** Max number of DIRECTIONS a single batch may run (rows x2 when bidirectional). */
+export const ACL_BULK_MAX_DIRECTIONS = 20
+
+/**
+ * One row of a bulk ADD: a source+destination pair (each IP + optional mask) and
+ * an optional per-row time range (same `new`/`existing` modes as a single ADD).
+ * A row carries NO changeTicket and NO credentials — those are batch-global so
+ * the whole batch is one tracked change under one ticket, run as one engineer.
+ */
+export const AclBulkItemSchema = z.object({
+  source: z.string().trim().min(1, 'Source is required').max(64),
+  sourceMask: MaskSchema.optional(),
+  destination: z.string().trim().min(1, 'Destination is required').max(64),
+  destinationMask: MaskSchema.optional(),
+  timeRange: AclAddTimeRangeSchema.optional(),
+  // PER-ROW bidirectional: when true, THIS row also adds the reverse direction
+  // (source<->destination and masks swapped) as a second independent n8n call.
+  // Decided per row, so a batch may mix one-way and two-way rows (the total
+  // direction count can be odd).
+  bidirectional: z.boolean().optional(),
+})
+export type AclBulkItemInput = z.infer<typeof AclBulkItemSchema>
+
+/**
+ * Bulk ADD payload: the rows plus the batch-global change ticket and
+ * credentials (one ticket tracks the whole batch; one engineer runs it).
+ * `bidirectional` is PER ROW on each item, NOT batch-global. `superRefine`
+ * enforces the 20-DIRECTION ceiling as the SUM over rows — each row counts 1,
+ * or 2 when its own `bidirectional` is on — so a mixed batch may total an odd
+ * number of directions.
+ */
+export const AclBulkExecuteSchema = z
+  .object({
+    items: z
+      .array(AclBulkItemSchema)
+      .min(1, 'Add at least one ACL row')
+      .max(ACL_BULK_MAX_DIRECTIONS, `A batch may have at most ${ACL_BULK_MAX_DIRECTIONS} rows`),
+    changeTicket: ChangeTicketSchema,
+  })
+  .merge(ExecCredentialsSchema)
+  .superRefine((v, ctx) => {
+    const directions = v.items.reduce((sum, item) => sum + (item.bidirectional ? 2 : 1), 0)
+    if (directions > ACL_BULK_MAX_DIRECTIONS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['items'],
+        message: `A batch may run at most ${ACL_BULK_MAX_DIRECTIONS} directions (each bidirectional row counts as 2).`,
+      })
+    }
+  })
+export type AclBulkExecuteInput = z.infer<typeof AclBulkExecuteSchema>
+
+/** Preview request for a bulk ADD — same shape as execute. */
+export const AclBulkPreviewSchema = AclBulkExecuteSchema
+export type AclBulkPreviewInput = z.infer<typeof AclBulkPreviewSchema>

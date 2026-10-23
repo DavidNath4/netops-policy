@@ -24,7 +24,7 @@ import { users } from './users'
  * The four JSONB columns are intentionally flexible so their shape can track n8n's
  * evolving request/response without a migration to the fixed columns.
  */
-export const auditModuleEnum = pgEnum('audit_module', ['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N'])
+export const auditModuleEnum = pgEnum('audit_module', ['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N', 'TIME_RANGE'])
 export const auditActionEnum = pgEnum('audit_action', ['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY'])
 export const auditStatusEnum = pgEnum('audit_status', ['SUCCESS', 'FAILED'])
 

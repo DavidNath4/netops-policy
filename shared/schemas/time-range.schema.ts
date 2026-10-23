@@ -1,10 +1,13 @@
 import { z } from 'zod'
 
+import { AclTimeRangeSchema } from './acl.schema'
+
 // Time-range OBJECTS that already live on the device, fetched read-only from the
-// n8n `GET /time/show` webhook so an ACL ADD can reference one by name (the
-// "Select Existing" mode) instead of defining a brand-new object. These are NOT
-// DB rows (there is no time-range table) and NOT rendered command strings — just
-// the catalog the Add page shows in its dropdown.
+// authenticated n8n `POST /time/show` webhook (body `{ user, pass }`) so an ACL
+// ADD can reference one by name (the "Select Existing" mode) instead of defining
+// a brand-new object. These are NOT DB rows (there is no time-range table) and
+// NOT rendered command strings — just the catalog the Add page shows in its
+// dropdown.
 
 /**
  * One raw time-range row as n8n returns it. Validated defensively: n8n may send
@@ -25,8 +28,9 @@ export const N8nTimeRangeRowSchema = z.object({
 export type N8nTimeRangeRow = z.infer<typeof N8nTimeRangeRowSchema>
 
 /**
- * The full `GET /time/show` response envelope. `data` defaults to `[]` so a body
- * missing the array still parses (the helper then returns an empty catalog).
+ * The full `POST /time/show` response envelope. `data` defaults to `[]` so a
+ * body missing the array still parses (the helper then returns an empty
+ * catalog).
  */
 export const N8nTimeShowResponseSchema = z.object({
   success: z.boolean().optional(),
@@ -54,6 +58,18 @@ export const TimeRangeListSchema = z.object({
   objects: z.array(TimeRangeObjectSchema),
 })
 export type TimeRangeList = z.infer<typeof TimeRangeListSchema>
+
+/**
+ * Request body the ACL ADD page sends to list the device's existing time-range
+ * objects. The `time/show` webhook now authenticates like the other n8n calls,
+ * so the device credentials typed on the Add page are POSTed (never in the URL/
+ * logs). The server never persists them and redacts them from any audit.
+ */
+export const TimeRangeListRequestSchema = z.object({
+  execUsername: z.string().trim().min(1).max(128),
+  execPassword: z.string().min(1).max(256),
+})
+export type TimeRangeListRequestInput = z.infer<typeof TimeRangeListRequestSchema>
 
 /** Map a validated raw n8n row to the clean client shape (undefined → null). */
 export function toTimeRangeObject(row: N8nTimeRangeRow): TimeRangeObject {
@@ -132,3 +148,120 @@ export function toTimeRangeUsage(row: N8nTimeUsageRow): TimeRangeUsage {
     rawCommands: row.raw_commands,
   }
 }
+
+// ---------------------------------------------------------------------------
+// Time Range OVERVIEW (the Time Range menu under ACL Policies).
+//
+// The Time Range page lists every device time-range object in a table with its
+// end detail AND how many ACL rules reference it, and a row click shows those
+// rules. This combines the two existing read-only webhooks — `time/show` (the
+// object catalog) and `time/isUsed` (per-object usage + the raw ACL commands) —
+// into ONE client shape so the page loads both in a single request. Credentials
+// come from the caller's Device Session Credentials (like Show ACL/Routes), not
+// the request body. Read-only: no audit, no device change.
+// ---------------------------------------------------------------------------
+
+/** One table row: a time-range object plus its ACL-rule usage. */
+export const TimeRangeOverviewSchema = TimeRangeObjectSchema.extend({
+  // How many ACL rules reference this object (from `time/isUsed`).
+  usageCount: z.number(),
+  // The raw ACL command lines that use it — shown in the row's usage pop-up and
+  // filtered client-side (never a second API call).
+  rawCommands: z.array(z.string()),
+})
+export type TimeRangeOverview = z.infer<typeof TimeRangeOverviewSchema>
+
+/** The overview list returned by the API to the Time Range page. */
+export const TimeRangeOverviewListSchema = z.object({
+  items: z.array(TimeRangeOverviewSchema),
+})
+export type TimeRangeOverviewList = z.infer<typeof TimeRangeOverviewListSchema>
+
+// ---------------------------------------------------------------------------
+// Time Range ADD (create a standalone object via n8n `POST /time/add`).
+//
+// Two modes, discriminated on `mode` (mirrors the ACL ADD time-range unit):
+// - `date`: pick a date (+ optional HH:mm, default 23:59); the server derives
+//           the object name `dd-mmm-yyyy` via `deriveAclTimeRange` — identical
+//           to the ACL Add "Create New" flow.
+// - `named`: type a free-form object name; the date + time still come from the
+//            same picker, but the name is taken verbatim.
+// Either way the server sends the SAME three keys to n8n (objectName, date,
+// time). Credentials come from the Device Session Credentials, not the body.
+// ---------------------------------------------------------------------------
+
+/** `date` mode: reuse the existing `{ date, time }` unit (23:59 default). */
+export const TimeRangeAddDateSchema = AclTimeRangeSchema.extend({
+  mode: z.literal('date'),
+})
+export type TimeRangeAddDateInput = z.infer<typeof TimeRangeAddDateSchema>
+
+/** A device time-range object name: no spaces, a safe character set, <=128. */
+const TimeRangeObjectNameSchema = z
+  .string()
+  .trim()
+  .min(1, 'Object name is required')
+  .max(128, 'Object name must be at most 128 characters')
+  .regex(/^[A-Za-z0-9._-]+$/, 'Use letters, digits, dot, underscore or hyphen (no spaces)')
+
+/** `named` mode: a typed object name + the same date/time picker unit. */
+export const TimeRangeAddNamedSchema = AclTimeRangeSchema.extend({
+  mode: z.literal('named'),
+  objectName: TimeRangeObjectNameSchema,
+})
+export type TimeRangeAddNamedInput = z.infer<typeof TimeRangeAddNamedSchema>
+
+/** The ADD request body (discriminated on `mode`). No credentials — the server
+ *  auto-fills them from the Device Session Credentials. */
+export const TimeRangeAddSchema = z.discriminatedUnion('mode', [
+  TimeRangeAddDateSchema,
+  TimeRangeAddNamedSchema,
+])
+export type TimeRangeAddInput = z.infer<typeof TimeRangeAddSchema>
+
+/** Result of a create: the final object name + n8n's status/message. */
+export const TimeRangeAddResultSchema = z.object({
+  status: z.enum(['SUCCESS', 'FAILED']),
+  objectName: z.string(),
+  message: z.string().nullable(),
+})
+export type TimeRangeAddResult = z.infer<typeof TimeRangeAddResultSchema>
+
+// ---------------------------------------------------------------------------
+// Time Range DELETE (remove a standalone object via n8n `POST /time/safeDelete`).
+//
+// Safe delete: n8n re-checks the device for ACL rules that reference the object
+// and REFUSES when any still use it (returning those rules), so the app never
+// orphans a rule. The Time Range page also disables Delete up front when the
+// loaded usageCount > 0; this is the server/device-side safety net. Credentials
+// come from the Device Session Credentials, not the body. Writes one audit row.
+// ---------------------------------------------------------------------------
+
+/** The DELETE request body — just the object name (creds auto-filled server-side). */
+export const TimeRangeDeleteSchema = z.object({
+  objectName: z
+    .string()
+    .trim()
+    .min(1, 'Object name is required')
+    .max(128, 'Object name must be at most 128 characters'),
+})
+export type TimeRangeDeleteInput = z.infer<typeof TimeRangeDeleteSchema>
+
+/** One ACL rule still using the object (returned when delete is refused). */
+export const TimeRangeBlockingRuleSchema = z.object({
+  aclName: z.string().nullable(),
+  rawRule: z.string(),
+})
+export type TimeRangeBlockingRule = z.infer<typeof TimeRangeBlockingRuleSchema>
+
+/** Result of a delete: status + the object name + n8n's message, plus the ACL
+ *  rules that blocked it (empty unless n8n refused for OBJECT_IN_USE). */
+export const TimeRangeDeleteResultSchema = z.object({
+  status: z.enum(['SUCCESS', 'FAILED']),
+  objectName: z.string(),
+  message: z.string().nullable(),
+  // When the delete was refused because the object is still used, the ACL rules
+  // that reference it — shown in the warning pop-up.
+  blockingRules: z.array(TimeRangeBlockingRuleSchema),
+})
+export type TimeRangeDeleteResult = z.infer<typeof TimeRangeDeleteResultSchema>

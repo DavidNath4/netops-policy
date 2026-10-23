@@ -2,19 +2,43 @@ import { randomUUID } from 'node:crypto'
 
 import type { Database } from '~~/database'
 import { getTicketByRef, ItopUnreachableError } from '../network/itop-client'
-import { callN8n, checkTimeRangeUsage, fetchTimeRanges } from '../network/n8n-client'
+import { addTimeRange, callN8n, checkTimeRangeUsage, fetchTimeRanges, safeDeleteTimeRange } from '../network/n8n-client'
+import { renderTimeRangeAdd, renderTimeRangeDelete } from '../network/command-templates'
 import { buildAclPreview, type CommandPreview } from '../network/preview'
 import { redactPayload } from '../network/redact'
 import { insertAclLog } from '../repositories/acl-log.repository'
 import type { AuditContext } from '../utils/audit-context'
 import { apiError } from '../utils/envelope'
-import { recordWithDetail } from './audit.service'
+import { record, recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import { deriveAclTimeRange } from '#shared/schemas/acl.schema'
-import type { AclExecuteInput, AclShowInput } from '#shared/schemas/acl.schema'
+import type {
+  AclBulkExecuteInput,
+  AclBulkItemInput,
+  AclBulkPreviewInput,
+  AclExecuteInput,
+  AclShowInput,
+} from '#shared/schemas/acl.schema'
 import { autoCorrectAclIp } from '#shared/schemas/network.schema'
-import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
-import type { TimeRangeList, TimeRangeUsageCheckInput, TimeRangeUsageList } from '#shared/schemas/time-range.schema'
+import type {
+  AclBulkExecuteResult,
+  AclBulkExecuteRow,
+  AclBulkPreviewResult,
+  AclBulkPreviewRow,
+  N8nResult,
+  OperationResult,
+} from '#shared/schemas/n8n.schema'
+import type {
+  TimeRangeAddInput,
+  TimeRangeAddResult,
+  TimeRangeDeleteInput,
+  TimeRangeDeleteResult,
+  TimeRangeList,
+  TimeRangeListRequestInput,
+  TimeRangeOverviewList,
+  TimeRangeUsageCheckInput,
+  TimeRangeUsageList,
+} from '#shared/schemas/time-range.schema'
 
 /**
  * ACL operations: show (read-only), preview (redacted, display-only), and
@@ -151,10 +175,15 @@ function toOperationResult(correlationId: string, r: N8nResult): OperationResult
  * Existing" dropdown. Read-only: delegates to the n8n `fetchTimeRanges` helper,
  * which NEVER throws — on any failure it yields an empty list, so the handler
  * still returns 200 and the page falls back to "Create New". No audit row (a
- * passive catalog fetch, not an ACL operation).
+ * passive catalog fetch, not an ACL operation). The `time/show` webhook now
+ * authenticates, so the device credentials typed on the Add page are forwarded;
+ * they are never persisted or logged.
  */
-export async function listAclTimeRanges(): Promise<TimeRangeList> {
-  const res = await fetchTimeRanges()
+export async function listAclTimeRanges(input: TimeRangeListRequestInput): Promise<TimeRangeList> {
+  const res = await fetchTimeRanges({
+    username: input.execUsername,
+    password: input.execPassword,
+  })
   return { objects: res.objects }
 }
 
@@ -172,6 +201,168 @@ export async function checkAclTimeRangeUsage(input: TimeRangeUsageCheckInput): P
     password: input.execPassword,
   })
   return { usages: res.usages }
+}
+
+/**
+ * Build the Time Range page overview: every device time-range OBJECT with its
+ * end detail AND the ACL rules that reference it. Combines the two read-only
+ * webhooks — `fetchTimeRanges` (the catalog) and `checkTimeRangeUsage` (per-name
+ * usage + raw ACL commands) — into one list. Credentials come from the caller's
+ * Device Session Credentials (resolved by the handler), like Show ACL/Routes.
+ *
+ * Read-only: no audit row, and both helpers NEVER throw (they degrade to empty).
+ * When there are no objects, the usage probe is skipped (nothing to check); any
+ * object missing from the usage response falls back to zero usage.
+ */
+export async function listTimeRangeOverview(
+  creds: DeviceCredentials,
+): Promise<TimeRangeOverviewList> {
+  const { objects } = await fetchTimeRanges(creds)
+  if (objects.length === 0) return { items: [] }
+
+  const { usages } = await checkTimeRangeUsage(objects.map(o => o.name), creds)
+  const usageByName = new Map(usages.map(u => [u.name, u]))
+
+  const items = objects.map((o) => {
+    const u = usageByName.get(o.name)
+    return {
+      ...o,
+      usageCount: u?.usageCount ?? 0,
+      rawCommands: u?.rawCommands ?? [],
+    }
+  })
+  return { items }
+}
+
+/**
+ * Create a STANDALONE time-range object on the device (Time Range page "Add").
+ * Two modes: `date` derives the object name `dd-mmm-yyyy` from the picked date
+ * (exactly like the ACL Add "Create New" flow); `named` takes a typed name. Both
+ * send the same three keys (objectName, date, time) to the n8n `time/add`
+ * webhook. Credentials come from the caller's Device Session Credentials.
+ *
+ * Duplicate guard (fail-closed, mirrors the ACL existence pre-check): before the
+ * create, re-list the device objects and REJECT with 409 if the target name is
+ * already present — so a direct API call cannot create a duplicate. Read-only
+ * helpers never throw; the create itself reports real success/failure.
+ */
+/**
+ * Derive the final object name + wire date/time for a Time Range ADD. `date`
+ * mode names it from the picked date (dd-mmm-yyyy, like ACL Add "Create New");
+ * `named` mode uses the typed name verbatim. Both reuse deriveAclTimeRange for
+ * the date/time wire format so it matches the ACL Add contract and the n8n
+ * `time/add` body. Single source shared by preview and create.
+ */
+function deriveTimeRangeAdd(input: TimeRangeAddInput): { objectName: string, date: string, time: string } {
+  const derived = deriveAclTimeRange({ date: input.date, time: input.time })
+  return {
+    objectName: input.mode === 'named' ? input.objectName : derived.objectName,
+    date: derived.date,
+    time: derived.time,
+  }
+}
+
+/**
+ * Build the display-only command preview for a Time Range ADD (no n8n, no audit,
+ * no device change) — the standalone `time-range` creation block. Mirrors
+ * `aclPreview`: pure, credential-free.
+ */
+export function previewTimeRangeAdd(input: TimeRangeAddInput): CommandPreview {
+  const { objectName, date, time } = deriveTimeRangeAdd(input)
+  const lines = renderTimeRangeAdd({ objectName, date, time })
+  return { command: lines, text: lines.join('\n') }
+}
+
+export async function createTimeRange(
+  db: Database,
+  ctx: AuditContext,
+  input: TimeRangeAddInput,
+  creds: DeviceCredentials,
+): Promise<TimeRangeAddResult> {
+  const { objectName, date, time } = deriveTimeRangeAdd(input)
+
+  // Duplicate guard: reject if an object with this name already lives on the
+  // device. fetchTimeRanges never throws (empty list on failure); a failed
+  // lookup does not block the add here, since the n8n create is itself the final
+  // authority and will reject a true duplicate. This pre-check writes NO audit
+  // (nothing was attempted on the device yet).
+  const { objects } = await fetchTimeRanges(creds)
+  if (objects.some(o => o.name === objectName)) {
+    throw apiError(409, 'TIME_RANGE_EXISTS', `Time range "${objectName}" sudah ada di perangkat.`)
+  }
+
+  const correlationId = randomUUID()
+  const res = await addTimeRange({ objectName, date, time }, creds)
+  const command = renderTimeRangeAdd({ objectName, date, time })
+
+  // Master audit row (TIME_RANGE / ADD). Like ACL, but master-only (no detail
+  // table). Payloads are redacted inside record(); the command is credential-
+  // free. The device user/pass are never in these payloads.
+  await record(db, {
+    ...ctx,
+    module: 'TIME_RANGE',
+    action: 'ADD',
+    status: res.ok ? 'SUCCESS' : 'FAILED',
+    correlationId,
+    requestPayload: { objectName, date, time, mode: input.mode },
+    commandPayload: { command },
+    responsePayload: { message: res.message },
+  })
+
+  // n8n is the final authority on duplicates (it re-checks the device): surface
+  // its OBJECT_ALREADY_EXISTS as the SAME 409 as the pre-check guard above, so
+  // the client handles both the same way. (The attempt is already audited above.)
+  if (!res.ok && res.alreadyExists) {
+    throw apiError(409, 'TIME_RANGE_EXISTS', res.message || `Time range "${objectName}" sudah ada di perangkat.`)
+  }
+
+  return {
+    status: res.ok ? 'SUCCESS' : 'FAILED',
+    objectName,
+    message: res.message,
+  }
+}
+
+/**
+ * Safely delete a standalone time-range object (Time Range page row "Delete").
+ * Delegates to the n8n `time/safeDelete` webhook, which re-checks the device and
+ * REFUSES when ACL rules still reference the object (returning those rules). The
+ * UI already disables Delete when the loaded usageCount > 0; this is the device-
+ * side safety net for the race where a rule was added after the table loaded.
+ *
+ * Writes ONE master audit row (TIME_RANGE / DELETE), mirroring the ACL master
+ * audit (no detail table). On an in-use refusal the blocking ACL rules are
+ * returned so the page can warn with them. Never throws for device/n8n errors
+ * (the helper degrades to a FAILED result).
+ */
+export async function deleteTimeRange(
+  db: Database,
+  ctx: AuditContext,
+  input: TimeRangeDeleteInput,
+  creds: DeviceCredentials,
+): Promise<TimeRangeDeleteResult> {
+  const correlationId = randomUUID()
+  const res = await safeDeleteTimeRange(input.objectName, creds)
+  const command = renderTimeRangeDelete(input.objectName)
+
+  await record(db, {
+    ...ctx,
+    module: 'TIME_RANGE',
+    action: 'DELETE',
+    status: res.ok ? 'SUCCESS' : 'FAILED',
+    correlationId,
+    requestPayload: { objectName: input.objectName },
+    commandPayload: { command },
+    // redactPayload passes through the n8n response (no credentials in it).
+    responsePayload: { message: res.message, inUse: res.inUse, blockingRules: res.blockingRules, n8nResponse: res.raw },
+  })
+
+  return {
+    status: res.ok ? 'SUCCESS' : 'FAILED',
+    objectName: input.objectName,
+    message: res.message,
+    blockingRules: res.blockingRules,
+  }
 }
 
 /**
@@ -389,6 +580,86 @@ async function runAclDirection(
 }
 
 /**
+ * Security guard: confirm the change ticket actually exists in iTop before any
+ * ACL execute runs. Shared by the single and bulk execute paths so both enforce
+ * the same posture. The UI forbids manual ticket entry (search + select only),
+ * but a direct API call could pass a well-formed yet FAKE ref. Block-total: if
+ * iTop cannot verify (unreachable/unconfigured), reject rather than execute.
+ */
+async function assertTicketExists(ticketRef: string): Promise<void> {
+  try {
+    const ticket = await getTicketByRef(ticketRef)
+    if (ticket === null) {
+      console.warn(`[acl] execute rejected: change ticket ${ticketRef} not found in iTop`)
+      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
+    }
+  }
+  catch (err) {
+    if (err instanceof ItopUnreachableError) {
+      console.warn(`[acl] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
+      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
+    }
+    throw err
+  }
+}
+
+/**
+ * Run ONE authenticated `acl/show` for an ADD pre-check and return its rows.
+ * Fail-closed (HARD gate): REJECTS with a 503 when the pre-check cannot produce
+ * a usable item list, rather than allowing an unverifiable add. Credentials are
+ * the per-request exec credentials (NOT DeviceCredentials); callN8n never logs
+ * user/pass or the API key, and never throws (the caller still wraps it).
+ */
+async function aclShowItemsForPrecheck(
+  searchIp: string,
+  creds: { execUsername: string, execPassword: string },
+): Promise<unknown[]> {
+  const result = await callN8n({
+    module: 'ACL',
+    action: 'SHOW',
+    correlationId: randomUUID(),
+    body: { user: creds.execUsername, pass: creds.execPassword, source: searchIp },
+  })
+  if (result.status === 'FAILED' || !Array.isArray(result.items)) {
+    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+  }
+  return result.items
+}
+
+/**
+ * ADD-only existence pre-check (IP PAIR ALONE; mask and time range ignored).
+ * Covers "same IP, different time range" AND "same IP, different subnet/mask".
+ * READ-ONLY: writes NO audit row (does NOT route through recordWithDetail);
+ * only the real execute (runAclDirection) audits. For a bidirectional ADD it
+ * checks BOTH directions and reports exists when EITHER is present — the server
+ * guard is a safety net that must not half-execute. The caller is expected to
+ * have already applied `withCorrectedAclIps`.
+ *
+ * Fail-closed: any throw (our own 503, or an unexpected error — callN8n itself
+ * never throws) is re-raised as the single 503, so an unverifiable pre-check
+ * never falls through to execute.
+ */
+async function aclAddAlreadyExists(input: AclExecuteInput): Promise<boolean> {
+  if (input.operation !== 'ADD') return false
+  const creds = { execUsername: input.execUsername, execPassword: input.execPassword }
+  try {
+    if (input.bidirectional) {
+      const forwardItems = await aclShowItemsForPrecheck(input.source.trim(), creds)
+      const reverseItems = await aclShowItemsForPrecheck(input.destination.trim(), creds)
+      return (
+        aclPairExists(forwardItems, input.source, input.destination)
+        || aclPairExists(reverseItems, input.destination, input.source)
+      )
+    }
+    const items = await aclShowItemsForPrecheck(input.source.trim(), creds)
+    return aclPairExists(items, input.source, input.destination)
+  }
+  catch {
+    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+  }
+}
+
+/**
  * ACL EXECUTE — confirmed add/delete, delegated to n8n. A one-way operation runs
  * once (one audit row). A bidirectional ACL ADD runs TWICE via runAclDirection:
  * the forward direction then the reverse (source/destination + masks swapped),
@@ -410,97 +681,24 @@ export async function aclExecute(
   // first, then swap for the reverse direction.)
   const input = withCorrectedAclIps(rawInput)
 
-  // Security guard: the UI forbids manual ticket entry (search + select only),
-  // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
-  // the change ticket actually exists in iTop before executing. Run ONCE — both
-  // directions of a bidirectional ADD share the same ticket. Block-total: if
-  // iTop cannot verify (unreachable/unconfigured), reject rather than execute.
-  const ticketRef = input.changeTicket
-  try {
-    const ticket = await getTicketByRef(ticketRef)
-    if (ticket === null) {
-      console.warn(`[acl] execute rejected: change ticket ${ticketRef} not found in iTop`)
-      throw apiError(404, 'TICKET_NOT_FOUND', 'Change ticket not found in iTop')
-    }
-  }
-  catch (err) {
-    if (err instanceof ItopUnreachableError) {
-      console.warn(`[acl] execute rejected: cannot verify change ticket ${ticketRef} (iTop unreachable)`)
-      throw apiError(503, 'ITOP_UNREACHABLE', 'Cannot verify the change ticket: iTop is unreachable')
-    }
-    throw err
-  }
+  // Security guard: confirm the change ticket exists in iTop before executing.
+  // Run ONCE — both directions of a bidirectional ADD share the same ticket.
+  await assertTicketExists(input.changeTicket)
 
   // Defense-in-depth ADD guards (mirror app/pages/acl/add.vue). The UI blocks
-  // these three cases before they reach the server, but a direct API call could
+  // these cases before they reach the server, but a direct API call could
   // bypass the form, so re-enforce them here. ADD ONLY — DELETE is never
   // guarded and falls straight through to the branch below.
   if (input.operation === 'ADD') {
     // GUARD 1 — same endpoint (pure, no n8n call): Source and Destination may
-    // not resolve to the SAME IPv4. Compare the already-corrected bare IPs
-    // (masks are carried separately). For a bidirectional ADD this single check
+    // not resolve to the SAME IPv4. For a bidirectional ADD this single check
     // covers both directions — swapping two equal values is still equal.
     if (input.source.trim() === input.destination.trim()) {
       throw apiError(400, 'ACL_SAME_ENDPOINT', 'Source dan Destination tidak boleh menggunakan IP yang sama.')
     }
 
-    // GUARDS 2 & 3 — existence pre-check (IP PAIR ALONE; mask and time range
-    // ignored). Covers "same IP, different time range" AND "same IP, different
-    // subnet/mask". READ-ONLY: this writes NO audit row (it does NOT route
-    // through recordWithDetail); only the real execute (runAclDirection) audits.
-    //
-    // Fail-closed (HARD gate, same posture as the iTop ticket guard above):
-    // unlike the never-throw advisory helpers for DELETE warnings
-    // (fetchTimeRanges / checkTimeRangeUsage, which degrade to empty lists),
-    // this guard REJECTS when the pre-check cannot produce a usable item list,
-    // rather than silently allowing an unverifiable add. callN8n never throws,
-    // but the call is wrapped in try/catch so any unexpected throw also fails
-    // closed.
-    const aclShowItems = async (searchIp: string): Promise<unknown[]> => {
-      const result = await callN8n({
-        module: 'ACL',
-        action: 'SHOW',
-        correlationId: randomUUID(),
-        // Per-request exec credentials from the ADD input (execute path, NOT
-        // DeviceCredentials). callN8n never logs user/pass or the API key.
-        body: { user: input.execUsername, pass: input.execPassword, source: searchIp },
-      })
-      if (result.status === 'FAILED' || !Array.isArray(result.items)) {
-        throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
-      }
-      return result.items
-    }
-
-    let alreadyExists: boolean
-    try {
-      if (input.bidirectional) {
-        // Bidirectional ADD: check BOTH directions and block if EITHER exists.
-        // Each acl/show searches by a single source IP, so two calls are needed
-        // (forward source→destination, reverse destination→source). DECISION:
-        // the client's partial-add "skip one direction" UX is a UI convenience;
-        // the server guard is a safety net and must REJECT rather than silently
-        // half-execute, so any existing direction blocks the whole ADD.
-        const forwardItems = await aclShowItems(input.source.trim())
-        const reverseItems = await aclShowItems(input.destination.trim())
-        alreadyExists
-          = aclPairExists(forwardItems, input.source, input.destination)
-            || aclPairExists(reverseItems, input.destination, input.source)
-      }
-      else {
-        // One-way ADD: check the forward pair only.
-        const items = await aclShowItems(input.source.trim())
-        alreadyExists = aclPairExists(items, input.source, input.destination)
-      }
-    }
-    catch {
-      // Any throw from the pre-check (our own fail-closed apiError, or an
-      // unexpected error — callN8n itself never throws) is a CLOSED gate: never
-      // fall through to execute on an unverifiable pre-check. Re-raise as the
-      // single 503 so the un-available posture is consistent.
-      throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
-    }
-
-    if (alreadyExists) {
+    // GUARDS 2 & 3 — existence pre-check (IP pair alone). Fail-closed.
+    if (await aclAddAlreadyExists(input)) {
       throw apiError(409, 'ACL_ALREADY_EXISTS', 'ACL untuk Source -> Destination ini sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.')
     }
   }
@@ -516,4 +714,135 @@ export async function aclExecute(
 
   // One-way ACL add/delete (or ADD with bidirectional off): a single call.
   return runAclDirection(db, ctx, input)
+}
+
+/**
+ * Turn one bulk row + the batch-global fields into the full single-ADD input
+ * shape the existing helpers already understand (withCorrectedAclIps,
+ * buildAclPreview, runAclDirection, aclAddAlreadyExists). Bulk never introduces
+ * a new wire shape — a row is just a single ADD with shared ticket/credentials.
+ */
+function bulkRowToAddInput(
+  item: AclBulkItemInput,
+  batch: Pick<AclBulkExecuteInput, 'changeTicket' | 'execUsername' | 'execPassword'>,
+): AclExecuteInput {
+  return {
+    operation: 'ADD',
+    source: item.source,
+    sourceMask: item.sourceMask,
+    destination: item.destination,
+    destinationMask: item.destinationMask,
+    changeTicket: batch.changeTicket,
+    execUsername: batch.execUsername,
+    execPassword: batch.execPassword,
+    timeRange: item.timeRange,
+    // Per-row bidirectional (NOT batch-global): aclAddAlreadyExists and
+    // runAclDirection already honor this flag per input.
+    bidirectional: item.bidirectional || undefined,
+  }
+}
+
+/**
+ * BULK ADD PREVIEW — classify every row (NEW / EXISTS) and render its redacted
+ * command, with NO audit and NO n8n execute. Each row runs the SAME ADD
+ * existence pre-check as the single flow (`aclAddAlreadyExists`, which honors
+ * `bidirectional` by checking both directions) and the SAME preview renderer
+ * (`buildAclPreview`). `hasBlocking` is true when any row already exists; the
+ * UI uses it to disable Execute until the operator removes the blocking rows.
+ *
+ * Pre-check is one `acl/show` per direction per row (kept simple; a per-source
+ * cache is a later optimization if ever needed). Fail-closed: if any row's
+ * pre-check cannot verify, `aclAddAlreadyExists` throws the shared 503 and the
+ * whole preview fails rather than mislabeling a row.
+ */
+export async function aclBulkPreview(input: AclBulkPreviewInput): Promise<AclBulkPreviewResult> {
+  const rows: AclBulkPreviewRow[] = []
+  for (let index = 0; index < input.items.length; index++) {
+    const corrected = withCorrectedAclIps(bulkRowToAddInput(input.items[index]!, input))
+    const exists = await aclAddAlreadyExists(corrected)
+    rows.push({
+      index,
+      source: corrected.source,
+      destination: corrected.destination,
+      status: exists ? 'EXISTS' : 'NEW',
+      command: buildAclPreview(corrected).command,
+    })
+  }
+  return { rows, hasBlocking: rows.some(r => r.status === 'EXISTS') }
+}
+
+/**
+ * BULK ADD EXECUTE — add several pairs under ONE iTop ticket and ONE set of
+ * credentials. Posture is ALL-OR-NOTHING at the gate: the iTop ticket guard runs
+ * ONCE, then EVERY row is re-checked (same-endpoint + existence) up front; if any
+ * row is blocking (already exists or same endpoint), the WHOLE batch is rejected
+ * with 409 and NOTHING executes — a direct API call cannot half-apply a batch.
+ *
+ * Only once every row is clean does the batch run: each row goes through the
+ * existing per-direction `runAclDirection` (forward, then reverse when
+ * bidirectional), so every direction keeps its own correlation id and audit row.
+ * There is no cross-row transaction and no rollback (n8n has already executed on
+ * the device), so a row that fails at the n8n call is recorded as FAILED in its
+ * result while the other rows still run. `allOk` is true only when every
+ * direction of every row succeeded.
+ */
+export async function aclBulkExecute(
+  db: Database,
+  ctx: AuditContext,
+  input: AclBulkExecuteInput,
+): Promise<AclBulkExecuteResult> {
+  // 1) iTop ticket guard — ONCE for the whole batch (all rows share the ticket).
+  await assertTicketExists(input.changeTicket)
+
+  // 2) Pre-correct every row, then HARD-GATE the whole batch. Collect the rows
+  //    that are blocking (same endpoint or already on the device). If ANY row is
+  //    blocking, reject the batch and execute nothing (all-or-nothing posture
+  //    the preview gate also enforces client-side).
+  const corrected = input.items.map(item => withCorrectedAclIps(bulkRowToAddInput(item, input)))
+
+  const blocking: number[] = []
+  for (let index = 0; index < corrected.length; index++) {
+    const row = corrected[index]!
+    if (row.source.trim() === row.destination.trim()) {
+      blocking.push(index)
+      continue
+    }
+    if (await aclAddAlreadyExists(row)) {
+      blocking.push(index)
+    }
+  }
+  if (blocking.length > 0) {
+    throw apiError(
+      409,
+      'ACL_BULK_HAS_BLOCKING',
+      'Sebagian baris sudah ada di perangkat atau memakai IP Source = Destination. Hapus baris tersebut dari daftar, lalu jalankan ulang batch.',
+      // `fields` carries the blocking row indexes so the UI can re-highlight them.
+      { items: blocking.map(String) },
+    )
+  }
+
+  // 3) All rows clean → execute each via the existing per-direction path. A row
+  //    failing at the n8n call does NOT abort the batch; it is recorded FAILED.
+  const rows: AclBulkExecuteRow[] = []
+  let allOk = true
+  for (let index = 0; index < corrected.length; index++) {
+    const row = corrected[index]!
+    const forward = await runAclDirection(db, ctx, row)
+    let reverse: OperationResult | null = null
+    if (row.operation === 'ADD' && row.bidirectional) {
+      reverse = await runAclDirection(db, ctx, reverseAclDirection(row))
+    }
+    if (forward.status !== 'SUCCESS' || (reverse && reverse.status !== 'SUCCESS')) {
+      allOk = false
+    }
+    rows.push({
+      index,
+      source: row.source,
+      destination: row.destination,
+      forward,
+      reverse,
+    })
+  }
+
+  return { rows, allOk }
 }

@@ -3,6 +3,7 @@ import { getCookie } from 'h3'
 
 import type { Database } from '~~/database'
 import * as sessionRepo from '../repositories/session.repository'
+import { loadEnv } from '../utils/config'
 import { decryptSecret, encryptSecret } from '../utils/crypto'
 import { SESSION_COOKIE, hashSessionToken } from './session.service'
 
@@ -33,9 +34,10 @@ function tokenHashFromEvent(event: H3Event): string | null {
 }
 
 /**
- * Encrypt + store the device credentials on the caller's session. They live for
- * the lifetime of the session (no separate TTL); the handler validates them via
- * n8n before calling this.
+ * Encrypt + store the device credentials on the caller's session with a TTL of
+ * `DEVICE_CRED_TTL_MINUTES` (global, from env). The handler validates them via
+ * n8n before calling this. After the TTL, `getDeviceCredentials` treats them as
+ * absent — a single global expiry drives the head-bar countdown and re-prompt.
  */
 export async function setDeviceCredentials(
   db: Database,
@@ -46,13 +48,17 @@ export async function setDeviceCredentials(
   if (!tokenHash) {
     throw new Error('No session to attach device credentials to')
   }
+  const ttlMinutes = loadEnv().DEVICE_CRED_TTL_MINUTES
+  const expiresAt = new Date(Date.now() + ttlMinutes * 60_000)
   const encrypted = encryptSecret(JSON.stringify(creds))
-  await sessionRepo.setDeviceCred(db, tokenHash, encrypted)
+  await sessionRepo.setDeviceCred(db, tokenHash, encrypted, expiresAt)
 }
 
 /**
- * Decrypt the caller's device credentials, or null if unset. Valid for the life
- * of the session (removed with the session on logout/expiry).
+ * Decrypt the caller's device credentials, or null if unset OR EXPIRED. The TTL
+ * is enforced here: once `device_cred_expires_at` is in the past the row's creds
+ * are cleared and null is returned, so every device call re-prompts after the
+ * window — the security guarantee behind the head-bar countdown.
  */
 export async function getDeviceCredentials(
   db: Database,
@@ -66,6 +72,11 @@ export async function getDeviceCredentials(
   if (!session?.deviceCredEncrypted) {
     return null
   }
+  // Expired: clear and treat as absent.
+  if (session.deviceCredExpiresAt && session.deviceCredExpiresAt.getTime() <= Date.now()) {
+    await sessionRepo.clearDeviceCred(db, tokenHash)
+    return null
+  }
   try {
     return JSON.parse(decryptSecret(session.deviceCredEncrypted)) as DeviceCredentials
   }
@@ -76,13 +87,26 @@ export async function getDeviceCredentials(
   }
 }
 
-/** Non-secret status for the UI: whether creds are set (+ username). */
+/**
+ * Non-secret status for the UI: whether creds are set (+ username) and, when
+ * set, the ISO `expiresAt` the head-bar countdown ticks down to. Returns unset
+ * once expired (getDeviceCredentials clears expired creds).
+ */
 export async function deviceCredentialStatus(
   db: Database,
   event: H3Event,
-): Promise<{ set: boolean, username?: string }> {
+): Promise<{ set: boolean, username?: string, expiresAt?: string }> {
   const creds = await getDeviceCredentials(db, event)
-  return creds ? { set: true, username: creds.username } : { set: false }
+  if (!creds) return { set: false }
+
+  // Re-read the row for the (now validated, non-expired) expiry timestamp.
+  const tokenHash = tokenHashFromEvent(event)
+  const session = tokenHash ? await sessionRepo.findByTokenHash(db, tokenHash) : null
+  return {
+    set: true,
+    username: creds.username,
+    expiresAt: session?.deviceCredExpiresAt?.toISOString(),
+  }
 }
 
 /** Clear the caller's device credentials immediately. */

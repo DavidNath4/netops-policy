@@ -58,18 +58,19 @@ export async function updateLastUsed(db: Database, tokenHash: string, at: Date):
 }
 
 /**
- * Store the encrypted Device Session Credentials on a session row. They are
- * valid for the life of the session (no separate TTL), so `device_cred_expires_at`
- * is left null.
+ * Store the encrypted Device Session Credentials on a session row with an
+ * explicit expiry (`now + DEVICE_CRED_TTL_MINUTES`, computed by the service).
+ * After `expiresAt` the service treats them as absent.
  */
 export async function setDeviceCred(
   db: Database,
   tokenHash: string,
   encrypted: string,
+  expiresAt: Date,
 ): Promise<void> {
   await db
     .update(sessions)
-    .set({ deviceCredEncrypted: encrypted, deviceCredExpiresAt: null })
+    .set({ deviceCredEncrypted: encrypted, deviceCredExpiresAt: expiresAt })
     .where(eq(sessions.tokenHash, tokenHash))
 }
 

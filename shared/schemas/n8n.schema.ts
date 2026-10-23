@@ -105,3 +105,48 @@ export const OperationResultSchema = OperationResultBase.extend({
   reverse: OperationResultBase.optional(),
 })
 export type OperationResult = z.infer<typeof OperationResultSchema>
+
+// ---------------------------------------------------------------------------
+// BULK ADD ACL results
+// ---------------------------------------------------------------------------
+// Bulk preview/execute return a per-row result so the UI can render each row's
+// status independently. These are server->client shapes (no secrets); they
+// reuse OperationResult for the executed-row outcome.
+
+/** One row of a bulk preview: its classification + redacted command lines. */
+export const AclBulkPreviewRowSchema = z.object({
+  index: z.number().int().nonnegative(),
+  source: z.string(),
+  destination: z.string(),
+  // NEW  = valid and not on the device yet (will be added).
+  // EXISTS = already on the device (blocks the whole batch until removed).
+  status: z.enum(['NEW', 'EXISTS']),
+  command: z.array(z.string()),
+})
+export type AclBulkPreviewRow = z.infer<typeof AclBulkPreviewRowSchema>
+
+/** Bulk preview result: every row + whether any EXISTS row blocks execute. */
+export const AclBulkPreviewResultSchema = z.object({
+  rows: z.array(AclBulkPreviewRowSchema),
+  // True when at least one row is EXISTS; the UI disables Execute while true.
+  hasBlocking: z.boolean(),
+})
+export type AclBulkPreviewResult = z.infer<typeof AclBulkPreviewResultSchema>
+
+/** One executed row: forward outcome + optional reverse (bidirectional). */
+export const AclBulkExecuteRowSchema = z.object({
+  index: z.number().int().nonnegative(),
+  source: z.string(),
+  destination: z.string(),
+  forward: OperationResultBase,
+  reverse: OperationResultBase.nullable().optional(),
+})
+export type AclBulkExecuteRow = z.infer<typeof AclBulkExecuteRowSchema>
+
+/** Bulk execute result: every executed row + overall success. */
+export const AclBulkExecuteResultSchema = z.object({
+  rows: z.array(AclBulkExecuteRowSchema),
+  // True only when every direction of every row succeeded.
+  allOk: z.boolean(),
+})
+export type AclBulkExecuteResult = z.infer<typeof AclBulkExecuteResultSchema>
