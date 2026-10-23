@@ -7,7 +7,7 @@
 # =============================================================================
 
 # Node 24 to match .nvmrc / package.json engines (>=22 <25).
-ARG NODE_VERSION=24
+ARG NODE_VERSION=24.22.1
 
 # -----------------------------------------------------------------------------
 # Stage 1 — build: install ALL deps (incl. dev) and produce .output
