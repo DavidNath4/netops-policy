@@ -173,7 +173,7 @@ watch(isSet, (set) => {
     <section v-else-if="result && result.status === 'FAILED'" class="flex flex-col gap-3">
       <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
         <p class="text-bad">✗ Failed to load routes</p>
-        <pre class="mt-1 whitespace-pre-wrap break-all text-bad">{{ result.error ?? result.message ?? 'Unknown error' }}</pre>
+        <pre class="mt-1 whitespace-pre-wrap break-words text-bad">{{ result.error ?? result.message ?? 'Unknown error' }}</pre>
       </div>
     </section>
 

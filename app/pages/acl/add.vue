@@ -8,7 +8,7 @@ import type { AclPreviewInput } from '#shared/schemas/acl.schema'
 import type { ItopTicketSummary } from '#shared/schemas/itop.schema'
 import type { OperationResult } from '#shared/schemas/n8n.schema'
 import type { TimeRangeObject } from '#shared/schemas/time-range.schema'
-import { autoCorrectAclIp, isValidIpv4 } from '#shared/schemas/network.schema'
+import { autoCorrectAclIp, isAnyAddress, isValidIpv4 } from '#shared/schemas/network.schema'
 
 definePageMeta({ middleware: 'permission', permission: 'ACL_POLICIES_ADD' })
 
@@ -102,8 +102,9 @@ const form = reactive({
   bidirectional: false,
 })
 
-// Seed execUsername/execPassword from the global head-bar credentials.
-useAutofillDeviceCreds(form)
+// Seed execUsername/execPassword from the global head-bar credentials. Keep
+// `refillCreds` to re-seed after a successful execute clears the form.
+const { fill: refillCreds } = useAutofillDeviceCreds(form)
 
 // Which direction(s) the generated preview covers and the next Execute will
 // send. Set by onGenerate from the four pre-check cases; a plain one-way ADD
@@ -310,14 +311,19 @@ async function onGenerate() {
     showDialog('error', 'Invalid input', 'Enter a valid IPv4 address for Source and Destination.')
     return
   }
+  // Block 0.0.0.0/0 (any) on either endpoint — a catch-all ACL is fatal.
+  if (isAnyAddress(form.source, form.sourceMask) || isAnyAddress(form.destination, form.destinationMask)) {
+    showDialog('error', '0.0.0.0/0 not allowed', 'An ACL for 0.0.0.0/0 (any) would match all traffic and is not allowed. Use a specific address and mask.')
+    return
+  }
   // Block identical endpoints: Source and Destination may not resolve to the
   // same IPv4 address. Compare AFTER auto-correction (ticket IP vs its corrected
   // form), so this runs for both one-way and bidirectional before any pre-check.
   if (autoCorrectAclIp(form.source.trim()) === autoCorrectAclIp(form.destination.trim())) {
     showDialog(
       'warning',
-      'Source dan Destination sama',
-      'Source dan Destination tidak boleh menggunakan IP yang sama. Perbaiki salah satu alamat sebelum melanjutkan.',
+      'Source and Destination are the same',
+      'Source and Destination must not use the same IP address. Fix one of the addresses before continuing.',
     )
     return
   }
@@ -338,8 +344,8 @@ async function onGenerate() {
         preview.value = null
         showDialog(
           'warning',
-          'ACL sudah ada',
-          'Kedua arah (Source → Destination dan sebaliknya) sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.',
+          'ACL already exists',
+          'Both directions (Source → Destination and the reverse) already exist on the device. To change the subnet or time range, delete the existing entries via Delete ACL first, then add them again.',
         )
         return
       }
@@ -383,8 +389,8 @@ async function onGenerate() {
     if (exists) {
       showDialog(
         'warning',
-        'ACL sudah ada',
-        'ACL untuk Source → Destination ini sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.',
+        'ACL already exists',
+        'An ACL for this Source → Destination already exists on the device. To change the subnet or time range, delete the existing entry via Delete ACL first, then add it again.',
       )
       return
     }
@@ -416,6 +422,9 @@ function resetFields() {
   form.bidirectional = false
   runPlan.value = 'forward'
   selectedTicket.value = null
+  // Re-seed the device credentials from the global head-bar creds (they were
+  // just cleared above); a no-op if the global creds have since expired.
+  void refillCreds()
 }
 
 async function onExecuteConfirmed() {
@@ -662,7 +671,7 @@ const inputClass
                 </template>
               </USelectMenu>
               <p v-if="!credsForTimeRangeFilled" class="text-[11px] text-muted">
-                Isi Username &amp; Password dulu untuk memuat daftar time range dari perangkat.
+                Fill in Username &amp; Password first to load the device's time range list.
               </p>
               <p v-else-if="timeRangeLoading" class="text-[11px] text-muted">
                 Loading existing time range objects...
@@ -725,7 +734,7 @@ const inputClass
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold text-ink">Generated Command</h2>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <pre v-if="preview" class="whitespace-pre-wrap break-words">{{ preview }}</pre>
           <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
         </div>
 
@@ -780,9 +789,9 @@ const inputClass
               Source → Destination · {{ result.status }}
             </p>
             <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-              <pre v-if="resultDirections" class="whitespace-pre-wrap break-all text-terminal-text">{{ resultDirections.forward }}</pre>
-              <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
-              <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+              <pre v-if="resultDirections" class="whitespace-pre-wrap break-words text-terminal-text">{{ resultDirections.forward }}</pre>
+              <pre v-if="result.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ result.output }}</pre>
+              <pre v-else-if="result.error" class="whitespace-pre-wrap break-words text-bad">{{ result.error }}</pre>
             </div>
           </div>
 
@@ -794,9 +803,9 @@ const inputClass
               Source → Destination · {{ result.reverse.status }}
             </p>
             <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-              <pre v-if="resultDirections?.reverse" class="whitespace-pre-wrap break-all text-terminal-text">{{ resultDirections.reverse }}</pre>
-              <pre v-if="result.reverse.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.reverse.output }}</pre>
-              <pre v-else-if="result.reverse.error" class="whitespace-pre-wrap break-all text-bad">{{ result.reverse.error }}</pre>
+              <pre v-if="resultDirections?.reverse" class="whitespace-pre-wrap break-words text-terminal-text">{{ resultDirections.reverse }}</pre>
+              <pre v-if="result.reverse.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ result.reverse.output }}</pre>
+              <pre v-else-if="result.reverse.error" class="whitespace-pre-wrap break-words text-bad">{{ result.reverse.error }}</pre>
             </div>
           </div>
         </div>

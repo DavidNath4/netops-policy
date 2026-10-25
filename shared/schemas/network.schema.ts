@@ -161,6 +161,27 @@ export function autoCorrectAclIp(value: string): string {
 }
 
 /**
+ * True when an endpoint resolves to "any" (`0.0.0.0/0`) — a fatal catch-all that
+ * must never be added to an ACL or route. Flags when the ADDRESS is `0.0.0.0`
+ * OR the MASK is `0.0.0.0` (a /0 prefix covers every address regardless of the
+ * IP). An address already carrying an inline mask (space-separated) is split so
+ * either part can trip the check. Used by the UI to block submit and by the
+ * server as a hard gate. A blank/invalid mask does not count as /0.
+ */
+export function isAnyAddress(addr: string, mask?: string): boolean {
+  const raw = (addr ?? '').trim()
+  // An inline "IP MASK" string: take the parts from the address itself.
+  const [inlineIp, inlineMask] = raw.split(/\s+/)
+  const ip = (inlineIp ?? '').trim()
+  const m = (inlineMask ?? mask ?? '').trim()
+
+  if (ip === '0.0.0.0') return true
+  // Mask 0.0.0.0 === prefix /0 === matches everything.
+  if (m !== '' && maskToCidr(m) === 0) return true
+  return false
+}
+
+/**
  * Clamp a raw string to a legal partial-or-complete IPv4 / dotted-decimal mask
  * as the user types: keep only digits and dots, drop a leading dot, collapse
  * repeated dots, allow at most 4 octets, each at most 3 digits and capped at

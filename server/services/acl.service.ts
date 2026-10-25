@@ -19,7 +19,7 @@ import type {
   AclExecuteInput,
   AclShowInput,
 } from '#shared/schemas/acl.schema'
-import { autoCorrectAclIp } from '#shared/schemas/network.schema'
+import { autoCorrectAclIp, isAnyAddress } from '#shared/schemas/network.schema'
 import type {
   AclBulkExecuteResult,
   AclBulkExecuteRow,
@@ -288,7 +288,7 @@ export async function createTimeRange(
   // (nothing was attempted on the device yet).
   const { objects } = await fetchTimeRanges(creds)
   if (objects.some(o => o.name === objectName)) {
-    throw apiError(409, 'TIME_RANGE_EXISTS', `Time range "${objectName}" sudah ada di perangkat.`)
+    throw apiError(409, 'TIME_RANGE_EXISTS', `Time range "${objectName}" already exists on the device.`)
   }
 
   const correlationId = randomUUID()
@@ -313,7 +313,7 @@ export async function createTimeRange(
   // its OBJECT_ALREADY_EXISTS as the SAME 409 as the pre-check guard above, so
   // the client handles both the same way. (The attempt is already audited above.)
   if (!res.ok && res.alreadyExists) {
-    throw apiError(409, 'TIME_RANGE_EXISTS', res.message || `Time range "${objectName}" sudah ada di perangkat.`)
+    throw apiError(409, 'TIME_RANGE_EXISTS', res.message || `Time range "${objectName}" already exists on the device.`)
   }
 
   return {
@@ -642,7 +642,7 @@ async function aclShowItemsForPrecheck(
     body: { user: creds.execUsername, pass: creds.execPassword, source: searchIp },
   })
   if (result.status === 'FAILED' || !Array.isArray(result.items)) {
-    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Could not verify existing ACLs on the device right now. Please try again later.')
   }
   return result.items
 }
@@ -676,7 +676,54 @@ async function aclAddAlreadyExists(input: AclExecuteInput): Promise<boolean> {
     return aclPairExists(items, input.source, input.destination)
   }
   catch {
-    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Tidak dapat memverifikasi ACL yang sudah ada di perangkat saat ini. Coba lagi nanti.')
+    throw apiError(503, 'ACL_PRECHECK_UNAVAILABLE', 'Could not verify existing ACLs on the device right now. Please try again later.')
+  }
+}
+
+/**
+ * Hard guard: reject an ACL ADD whose source OR destination resolves to
+ * `0.0.0.0/0` ("any"). A catch-all ACL is potentially fatal (it would match all
+ * traffic), so neither a `0.0.0.0` address nor a `/0` mask is ever allowed. The
+ * caller passes already-corrected IPs. Pure, no device call.
+ */
+function assertNotAnyAclEndpoint(input: AclExecuteInput): void {
+  if (input.operation !== 'ADD') return
+  const srcMask = 'sourceMask' in input ? input.sourceMask : undefined
+  const dstMask = 'destinationMask' in input ? input.destinationMask : undefined
+  if (isAnyAddress(input.source, srcMask) || isAnyAddress(input.destination, dstMask)) {
+    throw apiError(400, 'ANY_ADDRESS_FORBIDDEN', 'An ACL for 0.0.0.0/0 (any) is not allowed — it would match all traffic. Use a specific address and mask.')
+  }
+}
+
+/**
+ * The derived object name for an ADD whose time range is "Create New" (mode
+ * `new`), or null when the ADD has no time range or uses an existing object.
+ * This is the name a `new` time range WOULD create on the device.
+ */
+function newTimeRangeName(input: AclExecuteInput): string | null {
+  if (input.operation !== 'ADD' || !input.timeRange || input.timeRange.mode !== 'new') return null
+  return deriveAclTimeRange(input.timeRange).objectName
+}
+
+/**
+ * Guard a "Create New" time range against DUPLICATION: reject when the derived
+ * object name already exists on the device. Existing-mode time ranges are fine
+ * (they intentionally reference an existing object); a plain add with no time
+ * range is a no-op here. Read-only (fetchTimeRanges never throws → empty list on
+ * failure, which does not block — n8n remains the final authority). Shared by
+ * the single ADD guard and the bulk gate.
+ */
+async function assertNewTimeRangeNotDuplicate(
+  name: string,
+  creds: { username: string, password: string },
+): Promise<void> {
+  const { objects } = await fetchTimeRanges(creds)
+  if (objects.some(o => o.name === name)) {
+    throw apiError(
+      409,
+      'TIME_RANGE_EXISTS',
+      `A time range named "${name}" already exists on the device. Use "Select Existing" to reference it instead of creating a new one.`,
+    )
   }
 }
 
@@ -711,16 +758,28 @@ export async function aclExecute(
   // bypass the form, so re-enforce them here. ADD ONLY — DELETE is never
   // guarded and falls straight through to the branch below.
   if (input.operation === 'ADD') {
+    // GUARD 0 — reject 0.0.0.0/0 (any) on either endpoint: a catch-all ACL is
+    // potentially fatal. Checked first, before anything hits the device.
+    assertNotAnyAclEndpoint(input)
+
     // GUARD 1 — same endpoint (pure, no n8n call): Source and Destination may
     // not resolve to the SAME IPv4. For a bidirectional ADD this single check
     // covers both directions — swapping two equal values is still equal.
     if (input.source.trim() === input.destination.trim()) {
-      throw apiError(400, 'ACL_SAME_ENDPOINT', 'Source dan Destination tidak boleh menggunakan IP yang sama.')
+      throw apiError(400, 'ACL_SAME_ENDPOINT', 'Source and Destination must not use the same IP address.')
     }
 
     // GUARDS 2 & 3 — existence pre-check (IP pair alone). Fail-closed.
     if (await aclAddAlreadyExists(input)) {
-      throw apiError(409, 'ACL_ALREADY_EXISTS', 'ACL untuk Source -> Destination ini sudah ada di perangkat. Untuk mengganti subnet atau time range-nya, hapus dulu entri yang ada melalui menu Delete ACL, lalu tambahkan kembali.')
+      throw apiError(409, 'ACL_ALREADY_EXISTS', 'An ACL for this Source -> Destination already exists on the device. To change its subnet or time range, delete the existing entry via Delete ACL first, then add it again.')
+    }
+
+    // GUARD 4 — "Create New" time range must not duplicate an existing object
+    // name on the device (no second object with the same name). Existing-mode
+    // time ranges reference an object on purpose and are skipped.
+    const trName = newTimeRangeName(input)
+    if (trName) {
+      await assertNewTimeRangeNotDuplicate(trName, { username: input.execUsername, password: input.execPassword })
     }
   }
 
@@ -745,7 +804,7 @@ export async function aclExecute(
  */
 function bulkRowToAddInput(
   item: AclBulkItemInput,
-  batch: Pick<AclBulkExecuteInput, 'changeTicket' | 'execUsername' | 'execPassword'>,
+  batch: Pick<AclBulkExecuteInput, 'changeTicket' | 'execUsername' | 'execPassword' | 'globalTimeRange'>,
 ): AclExecuteInput {
   return {
     operation: 'ADD',
@@ -756,7 +815,10 @@ function bulkRowToAddInput(
     changeTicket: batch.changeTicket,
     execUsername: batch.execUsername,
     execPassword: batch.execPassword,
-    timeRange: item.timeRange,
+    // The batch-global time range (existing-only) OVERRIDES the row's own when
+    // present, so every row shares one on-device object; otherwise the row uses
+    // its own time range. Global is existing-mode, so it never creates a dupe.
+    timeRange: batch.globalTimeRange ?? item.timeRange,
     // Per-row bidirectional (NOT batch-global): aclAddAlreadyExists and
     // runAclDirection already honor this flag per input.
     bidirectional: item.bidirectional || undefined,
@@ -776,20 +838,87 @@ function bulkRowToAddInput(
  * pre-check cannot verify, `aclAddAlreadyExists` throws the shared 503 and the
  * whole preview fails rather than mislabeling a row.
  */
+/**
+ * Detect "Create New" time-range name duplications across a corrected batch.
+ * Returns, per row index, a blocking reason string when the row's `new`
+ * time-range name clashes EITHER with another `new` row in the SAME batch OR
+ * with an object already on the device. Rows with no `new` time range (plain,
+ * existing-mode, or the global time range which is existing-only) never clash.
+ *
+ * One `fetchTimeRanges` call per batch (device names), plus an in-batch tally.
+ * Never throws (device lookup degrades to empty — n8n stays the final authority
+ * at execute time).
+ */
+async function bulkNewTimeRangeClashes(
+  corrected: AclExecuteInput[],
+  creds: { username: string, password: string },
+): Promise<Map<number, string>> {
+  const names = corrected.map(newTimeRangeName)
+  const anyNew = names.some(n => n !== null)
+  const clashes = new Map<number, string>()
+  if (!anyNew) return clashes
+
+  // In-batch tally: how many rows derive each new name.
+  const counts = new Map<string, number>()
+  for (const n of names) if (n) counts.set(n, (counts.get(n) ?? 0) + 1)
+
+  // Device names (existing objects).
+  const { objects } = await fetchTimeRanges(creds)
+  const onDevice = new Set(objects.map(o => o.name))
+
+  for (let i = 0; i < names.length; i++) {
+    const n = names[i]
+    if (!n) continue
+    if (onDevice.has(n)) {
+      clashes.set(i, `Time range "${n}" already exists on the device. Use the global or per-row "Select Existing" instead.`)
+    }
+    else if ((counts.get(n) ?? 0) > 1) {
+      clashes.set(i, `Time range "${n}" is created by more than one row. Keep one "Create New" and switch the others to "Select Existing".`)
+    }
+  }
+  return clashes
+}
+
 export async function aclBulkPreview(input: AclBulkPreviewInput): Promise<AclBulkPreviewResult> {
+  const corrected = input.items.map(item => withCorrectedAclIps(bulkRowToAddInput(item, input)))
+  const trClashes = await bulkNewTimeRangeClashes(corrected, {
+    username: input.execUsername,
+    password: input.execPassword,
+  })
+
   const rows: AclBulkPreviewRow[] = []
-  for (let index = 0; index < input.items.length; index++) {
-    const corrected = withCorrectedAclIps(bulkRowToAddInput(input.items[index]!, input))
-    const exists = await aclAddAlreadyExists(corrected)
+  for (let index = 0; index < corrected.length; index++) {
+    const row = corrected[index]!
+    const srcMask = 'sourceMask' in row ? row.sourceMask : undefined
+    const dstMask = 'destinationMask' in row ? row.destinationMask : undefined
+    const isAny = isAnyAddress(row.source, srcMask) || isAnyAddress(row.destination, dstMask)
+    const exists = isAny ? false : await aclAddAlreadyExists(row)
+    const trReason = trClashes.get(index) ?? null
+    // Precedence: any-address (fatal) first, then pair-exists, then TR duplicate.
+    let status: AclBulkPreviewRow['status'] = 'NEW'
+    let reason: string | null = null
+    if (isAny) {
+      status = 'EXISTS'
+      reason = '0.0.0.0/0 (any) is not allowed — it would match all traffic. Use a specific address and mask.'
+    }
+    else if (exists) {
+      status = 'EXISTS'
+      reason = 'This Source → Destination already exists on the device.'
+    }
+    else if (trReason) {
+      status = 'TR_DUPLICATE'
+      reason = trReason
+    }
     rows.push({
       index,
-      source: corrected.source,
-      destination: corrected.destination,
-      status: exists ? 'EXISTS' : 'NEW',
-      command: buildAclPreview(corrected).command,
+      source: row.source,
+      destination: row.destination,
+      status,
+      reason,
+      command: buildAclPreview(row).command,
     })
   }
-  return { rows, hasBlocking: rows.some(r => r.status === 'EXISTS') }
+  return { rows, hasBlocking: rows.some(r => r.status !== 'NEW') }
 }
 
 /**
@@ -821,24 +950,40 @@ export async function aclBulkExecute(
   //    the preview gate also enforces client-side).
   const corrected = input.items.map(item => withCorrectedAclIps(bulkRowToAddInput(item, input)))
 
-  const blocking: number[] = []
+  // "Create New" time-range name duplications (device + in-batch), computed once.
+  const trClashes = await bulkNewTimeRangeClashes(corrected, {
+    username: input.execUsername,
+    password: input.execPassword,
+  })
+
+  const blocking = new Set<number>()
   for (let index = 0; index < corrected.length; index++) {
     const row = corrected[index]!
+    const srcMask = 'sourceMask' in row ? row.sourceMask : undefined
+    const dstMask = 'destinationMask' in row ? row.destinationMask : undefined
+    if (isAnyAddress(row.source, srcMask) || isAnyAddress(row.destination, dstMask)) {
+      blocking.add(index)
+      continue
+    }
     if (row.source.trim() === row.destination.trim()) {
-      blocking.push(index)
+      blocking.add(index)
       continue
     }
     if (await aclAddAlreadyExists(row)) {
-      blocking.push(index)
+      blocking.add(index)
+      continue
+    }
+    if (trClashes.has(index)) {
+      blocking.add(index)
     }
   }
-  if (blocking.length > 0) {
+  if (blocking.size > 0) {
     throw apiError(
       409,
       'ACL_BULK_HAS_BLOCKING',
-      'Sebagian baris sudah ada di perangkat atau memakai IP Source = Destination. Hapus baris tersebut dari daftar, lalu jalankan ulang batch.',
+      'Some rows are blocked: they already exist, use Source = Destination, or create a duplicate time-range name. Fix those rows, then run the batch again.',
       // `fields` carries the blocking row indexes so the UI can re-highlight them.
-      { items: blocking.map(String) },
+      { items: [...blocking].map(String) },
     )
   }
 

@@ -24,8 +24,9 @@ const creds = reactive({ execUsername: '', execPassword: '' })
 const changeTicket = ref('')
 const rows = reactive<BulkRow[]>([emptyBulkRow()])
 
-// Seed the batch credentials from the global head-bar credentials.
-useAutofillDeviceCreds(creds)
+// Seed the batch credentials from the global head-bar credentials. Keep
+// `refillCreds` to re-seed after a successful execute clears the form.
+const { fill: refillCreds } = useAutofillDeviceCreds(creds)
 
 const showPassword = ref(false)
 
@@ -69,7 +70,19 @@ const timeRangeLoadError = ref(false)
 const timeRangeLoaded = ref(false)
 
 const credsFilled = computed(() => creds.execUsername.trim() !== '' && creds.execPassword !== '')
-const anyExistingMode = computed(() => rows.some(r => r.timeRangeEnabled && r.timeRangeMode === 'existing'))
+
+// Batch-global time range (existing-only). When enabled + an object is picked,
+// it applies to EVERY row and the per-row time-range control is disabled. This
+// is the recommended way to give many rows the SAME schedule without each row
+// creating a duplicate "new" object.
+const globalTimeRange = reactive({ enabled: false, objectName: '' })
+// Active only when enabled AND an object is actually chosen.
+const globalTimeRangeActive = computed(() => globalTimeRange.enabled && globalTimeRange.objectName !== '')
+
+// The catalog is needed when the global picker is on, or any row uses existing.
+const anyExistingMode = computed(() =>
+  globalTimeRange.enabled || rows.some(r => r.timeRangeEnabled && r.timeRangeMode === 'existing'),
+)
 
 async function loadTimeRanges() {
   if (!credsFilled.value || timeRangeLoaded.value || timeRangeLoading.value) return
@@ -125,6 +138,9 @@ function buildPayload(): AclBulkExecuteInput {
   return {
     items: rows.map(bulkRowToItem),
     changeTicket: changeTicket.value,
+    globalTimeRange: globalTimeRangeActive.value
+      ? { mode: 'existing', objectName: globalTimeRange.objectName }
+      : undefined,
     execUsername: creds.execUsername,
     execPassword: creds.execPassword,
   }
@@ -173,14 +189,14 @@ function toMessage(e: unknown, fallback: string): string {
 const rowsDataSignature = computed(() =>
   JSON.stringify(rows.map(({ expanded, ...data }) => data)),
 )
-watch([rowsDataSignature, creds, changeTicket], () => {
+watch([rowsDataSignature, creds, changeTicket, globalTimeRange], () => {
   previewResult.value = null
   executeResult.value = null
 }, { deep: true })
 
 async function onGenerate() {
   if (!canGenerate.value) {
-    showDialog('error', 'Lengkapi form', 'Isi kredensial, pilih ticket, dan perbaiki baris yang belum valid sebelum Generate.')
+    showDialog('error', 'Complete the form', 'Fill in the credentials, pick a ticket, and fix any invalid rows before Generate.')
     return
   }
   generating.value = true
@@ -189,24 +205,22 @@ async function onGenerate() {
     const res = await api.aclOps.bulkPreview(buildPayload())
     previewResult.value = res
     if (res.hasBlocking) {
-      // Auto-expand the blocking rows so the operator can find and remove them.
-      res.rows.filter(r => r.status === 'EXISTS').forEach((r) => {
-        if (rows[r.index]) rows[r.index]!.expanded = true
-      })
-      const list = res.rows
-        .filter(r => r.status === 'EXISTS')
-        .map(r => `#${r.index + 1}  ${r.source} → ${r.destination}`)
+      // Auto-expand every blocking row so the operator can find and fix them.
+      const blocked = res.rows.filter(r => r.status !== 'NEW')
+      blocked.forEach((r) => { if (rows[r.index]) rows[r.index]!.expanded = true })
+      const list = blocked
+        .map(r => `#${r.index + 1}  ${r.source} → ${r.destination} — ${r.reason ?? 'blocked'}`)
         .join('\n')
       showDialog(
         'warning',
-        'Sebagian ACL sudah ada',
-        `Baris berikut sudah ada di perangkat dan diblok (highlight merah di daftar). `
-        + `Hapus baris ini dari daftar secara manual, lalu Generate ulang:\n\n${list}`,
+        'Some rows are blocked',
+        `The following rows are blocked (highlighted red in the list). `
+        + `Fix or remove them, then Generate again:\n\n${list}`,
       )
     }
   }
   catch (e) {
-    showDialog('error', 'Generate gagal', toMessage(e, 'Gagal membuat preview batch.'))
+    showDialog('error', 'Generate failed', toMessage(e, 'Failed to build the batch preview.'))
   }
   finally {
     generating.value = false
@@ -218,7 +232,12 @@ function resetAll() {
   creds.execPassword = ''
   changeTicket.value = ''
   selectedTicket.value = null
+  globalTimeRange.enabled = false
+  globalTimeRange.objectName = ''
   rows.splice(0, rows.length, emptyBulkRow())
+  // Re-seed the batch credentials from the global head-bar creds (just cleared);
+  // a no-op if the global creds have since expired.
+  void refillCreds()
 }
 
 async function onExecuteConfirmed() {
@@ -234,15 +253,15 @@ async function onExecuteConfirmed() {
     }
     showDialog(
       res.allOk ? 'success' : 'error',
-      res.allOk ? 'Batch berhasil' : 'Sebagian baris gagal',
+      res.allOk ? 'Batch succeeded' : 'Some rows failed',
       res.allOk
-        ? `${res.rows.length} baris dieksekusi via automation.`
-        : 'Sebagian baris gagal dieksekusi. Lihat detail per baris di bawah.',
+        ? `${res.rows.length} row(s) executed via automation.`
+        : 'Some rows failed to execute. See the per-row detail below.',
     )
   }
   catch (e) {
     confirmOpen.value = false
-    showDialog('error', 'Eksekusi gagal', toMessage(e, 'Eksekusi batch gagal.'))
+    showDialog('error', 'Execution failed', toMessage(e, 'Batch execution failed.'))
   }
   finally {
     executing.value = false
@@ -316,8 +335,11 @@ const inputClass
         </FormField>
       </div>
 
-      <!-- Batch-global ticket (bidirectional is per row, inside each card). -->
+      <!-- Batch-global ticket (bidirectional is per row, inside each card). -->  
+      <!-- Ticket Change + Global Time Range -->
       <div class="grid grid-cols-1 gap-4 sm:grid-cols-2">
+
+        <!-- LEFT: Ticket Change -->
         <FormField label="Ticket Change" name="changeTicket" required>
           <template #default="{ id }">
             <div class="flex items-center gap-2">
@@ -329,14 +351,86 @@ const inputClass
                 placeholder="No ticket selected"
                 :class="inputClass"
               >
-              <UButton color="neutral" variant="outline" label="Select ticket" @click="ticketModalOpen = true" />
+              <UButton
+                color="neutral"
+                variant="outline"
+                label="Select ticket"
+                @click="ticketModalOpen = true"
+              />
             </div>
             <p v-if="!changeTicket" class="mt-1 text-[11px] text-muted">
               One ticket tracks the whole batch.
             </p>
           </template>
         </FormField>
+
+        <!-- RIGHT: Global Time Range -->
+        <div class="flex flex-col gap-2">
+
+          <!-- Checkbox + Label -->
+          <label class="flex min-h-[20px] items-center gap-2 text-xs font-medium text-ink">
+            <input
+              v-model="globalTimeRange.enabled"
+              type="checkbox"
+              class="size-3.5 rounded border-line text-brand focus:ring-brand"
+            >
+            Apply one time range to all rows (Select Existing)
+          </label>
+
+          <!-- Select appears only when checked -->
+          <template v-if="globalTimeRange.enabled">
+            <USelectMenu
+              v-model="globalTimeRange.objectName"
+              :items="timeRangeItems"
+              value-key="value"
+              label-key="label"
+              :filter-fields="['label', 'detail']"
+              :search-input="{ placeholder: 'Search time range...' }"
+              placeholder="Select time range for all rows..."
+              color="neutral"
+              variant="outline"
+              class="w-full"
+              aria-label="Global time range object"
+              :ui="{
+                base: 'bg-panel text-ink ring-line min-h-[38px]',
+                content: 'bg-panel ring-line',
+                viewport: 'max-h-[20rem]'
+              }"
+            >
+              <template #item-label="{ item }">
+                <div class="flex flex-col">
+                  <span class="text-xs text-ink">{{ item.label }}</span>
+                  <span v-if="item.detail" class="text-[10px] text-muted">
+                    {{ item.detail }}
+                  </span>
+                </div>
+              </template>
+            </USelectMenu>
+
+            <p v-if="!credsFilled" class="text-[11px] text-muted">
+              Fill in Username &amp; Password first to load the time range list.
+            </p>
+            <p v-else-if="timeRangeLoading" class="text-[11px] text-muted">
+              Loading existing time range objects...
+            </p>
+            <p
+              v-else-if="timeRangeLoadError || timeRangeObjects.length === 0"
+              class="text-[11px] text-muted"
+            >
+              No existing time range objects could be loaded.
+            </p>
+            <p v-else class="text-[11px] text-muted">
+              This time range applies to every row; per-row time range is disabled while this is on.
+            </p>
+          </template>
+        </div>
       </div>
+
+      <ItopTicketModal
+        v-model="ticketModalOpen"
+        @selected="onTicketSelected"
+      />
+
 
       <ItopTicketModal v-model="ticketModalOpen" @selected="onTicketSelected" />
 
@@ -378,6 +472,7 @@ const inputClass
             :time-range-loading="timeRangeLoading"
             :time-range-load-error="timeRangeLoadError"
             :time-range-objects="timeRangeObjects"
+            :time-range-disabled="globalTimeRangeActive"
             @remove="removeRow(i)"
           />
         </div>
@@ -391,20 +486,23 @@ const inputClass
             v-for="prow in previewResult.rows"
             :key="prow.index"
             class="rounded-lg border p-4 font-mono text-xs leading-relaxed"
-            :class="prow.status === 'EXISTS'
+            :class="prow.status !== 'NEW'
               ? 'border-bad bg-bad/5 text-bad'
               : 'border-line bg-terminal text-terminal-text'"
           >
-            <div class="mb-2 flex items-center gap-2 font-sans">
-              <span
-                class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
-                :class="prow.status === 'EXISTS' ? 'bg-bad/10 text-bad' : 'bg-ok/10 text-ok'"
-              >{{ prow.status }}</span>
-              <span class="text-[11px] font-semibold" :class="prow.status === 'EXISTS' ? 'text-bad' : 'text-muted'">
-                Row #{{ prow.index + 1 }} · {{ prow.source }} → {{ prow.destination }}
-              </span>
+            <div class="mb-2 flex flex-col gap-1 font-sans">
+              <div class="flex items-center gap-2">
+                <span
+                  class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                  :class="prow.status !== 'NEW' ? 'bg-bad/10 text-bad' : 'bg-ok/10 text-ok'"
+                >{{ prow.status }}</span>
+                <span class="text-[11px] font-semibold" :class="prow.status !== 'NEW' ? 'text-bad' : 'text-muted'">
+                  Row #{{ prow.index + 1 }} · {{ prow.source }} → {{ prow.destination }}
+                </span>
+              </div>
+              <p v-if="prow.reason" class="text-[11px] text-bad">{{ prow.reason }}</p>
             </div>
-            <pre class="whitespace-pre-wrap break-all">{{ prow.command.join('\n') }}</pre>
+            <pre class="whitespace-pre-wrap break-words">{{ prow.command.join('\n') }}</pre>
           </div>
 
           <div
@@ -414,9 +512,9 @@ const inputClass
           >
             <UIcon name="i-lucide-triangle-alert" class="mt-0.5 size-4 shrink-0" />
             <span>
-              Sebagian baris sudah ada di perangkat (highlight merah). Hapus baris tersebut
-              dari daftar secara manual, lalu Generate ulang. Batch tidak bisa dieksekusi
-              selama masih ada baris yang sudah ada.
+              Some rows are blocked (highlighted red) — they already exist or create a
+              duplicate time-range name. Fix or remove them, then Generate again. The
+              batch cannot be executed while any row is blocked.
             </span>
           </div>
         </div>
@@ -479,10 +577,10 @@ const inputClass
               </template>
             </p>
             <div class="rounded bg-terminal p-2 font-mono text-[11px] leading-relaxed">
-              <pre v-if="erow.forward.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ erow.forward.output }}</pre>
-              <pre v-else-if="erow.forward.error" class="whitespace-pre-wrap break-all text-bad">{{ erow.forward.error }}</pre>
-              <pre v-if="erow.reverse?.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ erow.reverse.output }}</pre>
-              <pre v-else-if="erow.reverse?.error" class="whitespace-pre-wrap break-all text-bad">{{ erow.reverse.error }}</pre>
+              <pre v-if="erow.forward.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ erow.forward.output }}</pre>
+              <pre v-else-if="erow.forward.error" class="whitespace-pre-wrap break-words text-bad">{{ erow.forward.error }}</pre>
+              <pre v-if="erow.reverse?.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ erow.reverse.output }}</pre>
+              <pre v-else-if="erow.reverse?.error" class="whitespace-pre-wrap break-words text-bad">{{ erow.reverse.error }}</pre>
             </div>
           </div>
         </div>

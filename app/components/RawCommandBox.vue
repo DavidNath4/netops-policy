@@ -39,7 +39,7 @@ async function copy() {
           <UIcon :name="copied ? 'i-lucide-check' : 'i-lucide-copy'" class="size-3.5" :class="copied ? 'text-ok' : ''" />
           {{ copied ? 'Copied' : 'Copy' }}
         </button>
-      <pre class="whitespace-pre-wrap break-all text-terminal-text">{{ command }}</pre>
+      <pre class="whitespace-pre-wrap break-words text-terminal-text">{{ command }}</pre>
     </div>
   </div>
 </template>

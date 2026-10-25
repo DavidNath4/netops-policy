@@ -84,3 +84,43 @@ EARS style. UI/frontend conventions are in `.kiro/steering/ui-conventions.md`.
 - **Config:** validated at startup by the Zod `EnvSchema` in
   `server/utils/config.ts`; add new env vars there and add a placeholder to
   `.env.example`; nothing sensitive in `runtimeConfig.public`.
+
+
+
+
+## Kiro and Codex Alignment
+
+This repository is developed using both Kiro and Codex.
+
+### Source of Truth
+- AGENTS.md defines shared agent behavior.
+- .kiro/steering/ contains established project conventions.
+- .kiro/specs/ contains feature requirements, design decisions,
+  and implementation tasks.
+- Existing source code is the reference for implemented behavior.
+- README.md contains environment and development instructions.
+
+### Required Context Loading
+Before implementing a task:
+1. Read AGENTS.md.
+2. Read relevant files under .kiro/steering/.
+3. Identify the related feature in .kiro/specs/.
+4. Read its requirements, design, and tasks if present.
+5. Inspect the existing implementation.
+6. Identify any conflicts between docs and code.
+7. Report conflicts before making changes.
+
+### Cross-Agent Consistency
+- Do not create a competing architecture.
+- Follow existing Kiro design decisions.
+- Do not overwrite Kiro specifications automatically.
+- Do not mark Kiro tasks complete without user approval.
+- Do not assume previous agent conversations are available.
+- Treat committed code and approved specs as shared context.
+
+### Change Management
+- Keep modifications within the requested scope.
+- Explain planned changes before implementation.
+- Follow the existing rule that the user executes commands.
+- Ask before updating Kiro specifications.
+- Summarize modified files and validation requirements.

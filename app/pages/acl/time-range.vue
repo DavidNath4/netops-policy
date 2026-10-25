@@ -129,21 +129,21 @@ async function onDeleteConfirmed() {
     deleteConfirmOpen.value = false
     if (res.status === 'SUCCESS') {
       usageModalOpen.value = false
-      showDialog('success', 'Time range dihapus', `Object "${res.objectName}" berhasil dihapus dari perangkat.`)
+      showDialog('success', 'Time range deleted', `Object "${res.objectName}" was deleted from the device.`)
       loaded.value = false
       await loadOverview()
     }
     else {
       // Device/n8n refused (e.g. still in use, or an ASA error) — warn with the
       // blocking rules when present.
-      warningMessage.value = res.message ?? 'Perangkat menolak penghapusan time range.'
+      warningMessage.value = res.message ?? 'The device refused to delete the time range.'
       warningRules.value = res.blockingRules
       warningOpen.value = true
     }
   }
   catch (e) {
     deleteConfirmOpen.value = false
-    warningMessage.value = toMessage(e, 'Gagal menghapus time range.')
+    warningMessage.value = toMessage(e, 'Failed to delete the time range.')
     warningRules.value = []
     warningOpen.value = true
   }
@@ -234,7 +234,7 @@ async function onGenerate() {
     preview.value = text
   }
   catch (e) {
-    showDialog('error', 'Generate gagal', toMessage(e, 'Gagal membuat preview command.'))
+    showDialog('error', 'Generate failed', toMessage(e, 'Failed to build the command preview.'))
   }
   finally {
     generating.value = false
@@ -247,7 +247,7 @@ async function onExecuteConfirmed() {
     const res = await api.aclOps.timeRangeAdd(buildAddPayload())
     confirmOpen.value = false
     if (res.status === 'SUCCESS') {
-      showDialog('success', 'Time range dibuat', `Object "${res.objectName}" berhasil dibuat di perangkat.`)
+      showDialog('success', 'Time range created', `Object "${res.objectName}" was created on the device.`)
       addForm.mode = 'date'
       addForm.objectName = ''
       addForm.date = ''
@@ -257,12 +257,12 @@ async function onExecuteConfirmed() {
       await loadOverview()
     }
     else {
-      showDialog('error', 'Gagal membuat time range', res.message ?? 'Perangkat menolak pembuatan time range.')
+      showDialog('error', 'Failed to create time range', res.message ?? 'The device refused to create the time range.')
     }
   }
   catch (e) {
     confirmOpen.value = false
-    showDialog('error', 'Gagal membuat time range', toMessage(e, 'Gagal membuat time range.'))
+    showDialog('error', 'Failed to create time range', toMessage(e, 'Failed to create the time range.'))
   }
   finally {
     adding.value = false
@@ -414,7 +414,7 @@ const inputClass
             Gunakan huruf, angka, titik, underscore, atau tanda hubung (tanpa spasi).
           </p>
           <p v-else-if="nameDuplicate" class="text-[11px] text-bad" role="alert">
-            Nama object ini sudah ada di perangkat.
+            This object name already exists on the device.
           </p>
         </div>
 
@@ -445,7 +445,7 @@ const inputClass
       <div class="flex flex-col gap-2">
         <h3 class="text-sm font-semibold text-ink">Generated Command</h3>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <pre v-if="preview" class="whitespace-pre-wrap break-words">{{ preview }}</pre>
           <p v-else class="text-terminal-text/60">Fill the fields and click Generate to preview the command.</p>
         </div>
       </div>
@@ -516,10 +516,10 @@ const inputClass
           <!-- Delete action (ACL_POLICIES_DELETE only; disabled while in use). -->
           <div v-if="canDelete" class="flex items-center justify-between gap-3 border-t border-line pt-3">
             <p v-if="(usageObject?.usageCount ?? 0) > 0" class="text-[11px] text-muted">
-              Masih dipakai {{ usageObject?.usageCount }} ACL rule — hapus rule-nya dulu (via Delete ACL) sebelum object ini bisa dihapus.
+              Still used by {{ usageObject?.usageCount }} ACL rule(s) — remove those rules first (via Delete ACL) before this object can be deleted.
             </p>
             <p v-else class="text-[11px] text-muted">
-              Object ini tidak dipakai rule mana pun dan aman untuk dihapus.
+              This object is not used by any rule and is safe to delete.
             </p>
             <button
               type="button"
@@ -549,7 +549,7 @@ const inputClass
     <!-- Warning when the device/n8n refused the delete (e.g. still in use). -->
     <UModal
       v-model:open="warningOpen"
-      title="Tidak dapat menghapus time range"
+      title="Cannot delete time range"
       :ui="{ content: 'bg-white text-ink ring-1 ring-line divide-y divide-line', title: 'text-ink', body: 'bg-white' }"
     >
       <template #body>
@@ -559,7 +559,7 @@ const inputClass
             <p class="text-sm text-ink">{{ warningMessage }}</p>
           </div>
           <div v-if="warningRules.length > 0" class="flex flex-col gap-1">
-            <p class="text-[11px] font-semibold text-muted">ACL rules yang masih memakai object ini:</p>
+            <p class="text-[11px] font-semibold text-muted">ACL rules still using this object:</p>
             <div class="max-h-[15rem] overflow-y-auto rounded-md border border-line">
               <ul class="divide-y divide-line">
                 <li v-for="(r, i) in warningRules" :key="i" class="px-3 py-2 font-mono text-[11px] leading-relaxed text-ink">

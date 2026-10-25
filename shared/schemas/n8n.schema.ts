@@ -118,9 +118,14 @@ export const AclBulkPreviewRowSchema = z.object({
   index: z.number().int().nonnegative(),
   source: z.string(),
   destination: z.string(),
-  // NEW  = valid and not on the device yet (will be added).
-  // EXISTS = already on the device (blocks the whole batch until removed).
-  status: z.enum(['NEW', 'EXISTS']),
+  // NEW          = valid and not on the device yet (will be added).
+  // EXISTS       = the source→destination pair already exists on the device.
+  // TR_DUPLICATE = the row's "Create New" time-range name clashes with an
+  //                existing device object OR with another row's new time range.
+  // EXISTS and TR_DUPLICATE both block the batch until the row is fixed/removed.
+  status: z.enum(['NEW', 'EXISTS', 'TR_DUPLICATE']),
+  // Human-readable reason shown for a blocking row (null for NEW).
+  reason: z.string().nullable(),
   command: z.array(z.string()),
 })
 export type AclBulkPreviewRow = z.infer<typeof AclBulkPreviewRowSchema>

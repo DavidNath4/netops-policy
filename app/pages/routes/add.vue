@@ -5,7 +5,7 @@
 import type { ItopTicketSummary } from '#shared/schemas/itop.schema'
 import type { RoutePreviewInput } from '#shared/schemas/route.schema'
 import type { OperationResult } from '#shared/schemas/n8n.schema'
-import { isValidIpv4 } from '#shared/schemas/network.schema'
+import { isAnyAddress, isValidIpv4 } from '#shared/schemas/network.schema'
 
 definePageMeta({ middleware: 'permission', permission: 'ROUTES_ADD' })
 
@@ -19,8 +19,9 @@ const form = reactive({
   execPassword: '',
 })
 
-// Seed execUsername/execPassword from the global head-bar credentials.
-useAutofillDeviceCreds(form)
+// Seed execUsername/execPassword from the global head-bar credentials. Keep
+// `refillCreds` to re-seed after a successful execute clears the form.
+const { fill: refillCreds } = useAutofillDeviceCreds(form)
 
 const showPassword = ref(false)
 
@@ -93,6 +94,11 @@ async function onGenerate() {
     showDialog('error', 'Invalid input', 'Enter a valid IPv4 address for Route IP.')
     return
   }
+  // Block 0.0.0.0/0 (any) — a default/catch-all route is fatal.
+  if (isAnyAddress(form.routeIp, form.routeMask)) {
+    showDialog('error', '0.0.0.0/0 not allowed', 'A route for 0.0.0.0/0 (any) would affect all traffic and is not allowed. Use a specific destination and mask.')
+    return
+  }
   generating.value = true
   try {
     // Pre-check: an ADD must NOT already exist. Look it up as this engineer.
@@ -123,6 +129,9 @@ function resetFields() {
   form.execUsername = ''
   form.execPassword = ''
   selectedTicket.value = null
+  // Re-seed device credentials from the global head-bar creds (just cleared);
+  // a no-op if the global creds have since expired.
+  void refillCreds()
 }
 
 async function onExecuteConfirmed() {
@@ -263,7 +272,7 @@ const inputClass
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold text-ink">Generated Command</h2>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <pre v-if="preview" class="whitespace-pre-wrap break-words">{{ preview }}</pre>
           <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
         </div>
 
@@ -309,8 +318,8 @@ const inputClass
     >
       <template v-if="result" #body>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-          <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
-          <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+          <pre v-if="result.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ result.output }}</pre>
+          <pre v-else-if="result.error" class="whitespace-pre-wrap break-words text-bad">{{ result.error }}</pre>
         </div>
       </template>
     </ResultDialog>

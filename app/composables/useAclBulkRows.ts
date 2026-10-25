@@ -5,7 +5,7 @@
 //
 // Every field EXCEPT `expanded` is data sent to the API; `expanded` is UI-only.
 import type { AclBulkItemInput } from '#shared/schemas/acl.schema'
-import { autoCorrectAclIp, isValidIpv4 } from '#shared/schemas/network.schema'
+import { autoCorrectAclIp, isAnyAddress, isValidIpv4 } from '#shared/schemas/network.schema'
 
 /** One editable row of a bulk ADD. Mirrors a single-ADD's fields; the time range
  *  is per row. changeTicket + credentials are batch-global (not here). */
@@ -67,9 +67,18 @@ export function bulkRowTimeRangeValid(row: BulkRow): boolean {
   return row.timeRangeDate !== '' && bulkRowTimeFormatValid(row)
 }
 
-/** A row is submittable: valid IPs, distinct endpoints, complete time range. */
+/** True when either endpoint resolves to 0.0.0.0/0 (any) — never allowed. */
+export function bulkRowAnyAddress(row: BulkRow): boolean {
+  return isAnyAddress(row.source, row.sourceMask) || isAnyAddress(row.destination, row.destinationMask)
+}
+
+/** A row is submittable: valid IPs, not any-address, distinct endpoints,
+ *  complete time range. */
 export function bulkRowValid(row: BulkRow): boolean {
-  return bulkRowIpsValid(row) && !bulkRowSameEndpoint(row) && bulkRowTimeRangeValid(row)
+  return bulkRowIpsValid(row)
+    && !bulkRowAnyAddress(row)
+    && !bulkRowSameEndpoint(row)
+    && bulkRowTimeRangeValid(row)
 }
 
 /** Turn a row into the API item shape (trims, drops blanks, maps the time

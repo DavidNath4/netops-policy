@@ -9,7 +9,7 @@
 // component and the page share one source of truth.
 import type { BulkRow } from '~/composables/useAclBulkRows'
 import type { TimeRangeObject } from '#shared/schemas/time-range.schema'
-import { bulkRowSameEndpoint, bulkRowTimeFormatValid } from '~/composables/useAclBulkRows'
+import { bulkRowAnyAddress, bulkRowSameEndpoint, bulkRowTimeFormatValid } from '~/composables/useAclBulkRows'
 import { autoCorrectAclIp } from '#shared/schemas/network.schema'
 
 // Two-way bound row model (parent holds the array; this edits one entry).
@@ -26,6 +26,9 @@ const props = defineProps<{
   timeRangeLoading: boolean
   timeRangeLoadError: boolean
   timeRangeObjects: TimeRangeObject[]
+  /** When true, a batch-global time range is active — the per-row time range is
+   *  disabled (the row inherits the global object). */
+  timeRangeDisabled: boolean
 }>()
 
 const emit = defineEmits<{ remove: [] }>()
@@ -43,6 +46,7 @@ function onTimeInput(e: Event) {
 }
 
 const sameEndpoint = computed(() => bulkRowSameEndpoint(row.value))
+const anyAddress = computed(() => bulkRowAnyAddress(row.value))
 const timeFormatValid = computed(() => bulkRowTimeFormatValid(row.value))
 
 const inputClass
@@ -108,8 +112,11 @@ const inputClass
         </FormField>
       </div>
 
-      <p v-if="sameEndpoint" class="text-[11px] text-bad" role="alert">
-        Source dan Destination tidak boleh menggunakan IP yang sama.
+      <p v-if="anyAddress" class="text-[11px] text-bad" role="alert">
+        0.0.0.0/0 (any) is not allowed — use a specific address and mask.
+      </p>
+      <p v-else-if="sameEndpoint" class="text-[11px] text-bad" role="alert">
+        Source and Destination must not use the same IP address.
       </p>
 
       <!-- Per-row bidirectional: THIS row also adds destination → source. -->
@@ -122,18 +129,28 @@ const inputClass
         Bidirectional (also add destination → source, masks swapped)
       </label>
 
-      <!-- Per-row optional time range (same modes as single add). -->
-      <div class="flex flex-col gap-1.5">
-        <label class="flex items-center gap-2 text-sm font-medium text-ink">
+      <!-- Per-row optional time range (same modes as single add). Capped to about
+           half the row (aligned with the Source/Destination fields), not the full
+           width. Disabled when a batch-global time range is active. -->
+      <div class="flex flex-col gap-1.5 sm:max-w-[calc(50%-0.5rem)]">
+        <label
+          class="flex items-center gap-2 text-sm font-medium"
+          :class="timeRangeDisabled ? 'cursor-not-allowed text-muted' : 'text-ink'"
+        >
           <input
             v-model="row.timeRangeEnabled"
             type="checkbox"
-            class="size-3.5 rounded border-line text-brand focus:ring-brand"
+            :disabled="timeRangeDisabled"
+            class="size-3.5 rounded border-line text-brand focus:ring-brand disabled:cursor-not-allowed"
           >
           Time Range (optional)
         </label>
 
-        <template v-if="row.timeRangeEnabled">
+        <p v-if="timeRangeDisabled" class="text-[11px] text-muted">
+          A global time range is applied to all rows; per-row time range is disabled.
+        </p>
+
+        <template v-else-if="row.timeRangeEnabled">
           <div
             class="grid grid-cols-2 gap-1 rounded-md border border-line bg-surface p-1"
             role="tablist"
@@ -184,7 +201,7 @@ const inputClass
               </template>
             </USelectMenu>
             <p v-if="!credsFilled" class="text-[11px] text-muted">
-              Isi Username &amp; Password dulu untuk memuat daftar time range.
+              Fill in Username &amp; Password first to load the time range list.
             </p>
             <p v-else-if="timeRangeLoading" class="text-[11px] text-muted">
               Loading existing time range objects...

@@ -12,6 +12,7 @@ import { recordWithDetail } from './audit.service'
 import type { DeviceCredentials } from './device-credential.service'
 import type { RouteExecuteInput } from '#shared/schemas/route.schema'
 import type { N8nResult, OperationResult } from '#shared/schemas/n8n.schema'
+import { isAnyAddress } from '#shared/schemas/network.schema'
 
 /**
  * Route operations: show / preview / execute. Mirror of the ACL service; module
@@ -121,6 +122,13 @@ export async function routeExecute(
   ctx: AuditContext,
   input: RouteExecuteInput,
 ): Promise<OperationResult> {
+  // Hard guard: reject a 0.0.0.0/0 (any) route on ADD — a default/catch-all
+  // route is potentially fatal (it would redirect all traffic). Rejected when
+  // the route IP is 0.0.0.0 or the mask is /0. DELETE is left alone.
+  if (input.operation === 'ADD' && isAnyAddress(input.routeIp, input.routeMask)) {
+    throw apiError(400, 'ANY_ADDRESS_FORBIDDEN', 'A route for 0.0.0.0/0 (any) is not allowed — it would affect all traffic. Use a specific destination and mask.')
+  }
+
   // Security guard: the UI forbids manual ticket entry (search + select only),
   // but a direct API call could still pass a well-formed yet FAKE ref. Confirm
   // the change ticket actually exists in iTop before executing. Block-total: if

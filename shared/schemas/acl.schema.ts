@@ -218,6 +218,11 @@ export const AclBulkExecuteSchema = z
       .min(1, 'Add at least one ACL row')
       .max(ACL_BULK_MAX_DIRECTIONS, `A batch may have at most ${ACL_BULK_MAX_DIRECTIONS} rows`),
     changeTicket: ChangeTicketSchema,
+    // Optional BATCH-GLOBAL time range applied to EVERY row. Existing-only (pick
+    // an on-device object by name) — never a "new" object, so it can never
+    // create a duplicate. When present it OVERRIDES each row's own timeRange and
+    // the per-row time-range control is disabled in the UI.
+    globalTimeRange: AclTimeRangeExistingSchema.optional(),
   })
   .merge(ExecCredentialsSchema)
   .superRefine((v, ctx) => {

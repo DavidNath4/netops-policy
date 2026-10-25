@@ -19,8 +19,9 @@ const form = reactive({
   execPassword: '',
 })
 
-// Seed execUsername/execPassword from the global head-bar credentials.
-useAutofillDeviceCreds(form)
+// Seed execUsername/execPassword from the global head-bar credentials. Keep
+// `refillCreds` to re-seed after a successful execute clears the form.
+const { fill: refillCreds } = useAutofillDeviceCreds(form)
 
 const showPassword = ref(false)
 
@@ -123,6 +124,9 @@ function resetFields() {
   form.execUsername = ''
   form.execPassword = ''
   selectedTicket.value = null
+  // Re-seed device credentials from the global head-bar creds (just cleared);
+  // a no-op if the global creds have since expired.
+  void refillCreds()
 }
 
 async function onExecuteConfirmed() {
@@ -263,7 +267,7 @@ const inputClass
       <div class="flex flex-col gap-3">
         <h2 class="text-base font-semibold text-ink">Generated Command</h2>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed text-terminal-text">
-          <pre v-if="preview" class="whitespace-pre-wrap break-all">{{ preview }}</pre>
+          <pre v-if="preview" class="whitespace-pre-wrap break-words">{{ preview }}</pre>
           <p v-else class="text-terminal-text/60">Fill the form and click Generate to preview the command.</p>
         </div>
 
@@ -309,8 +313,8 @@ const inputClass
     >
       <template v-if="result" #body>
         <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-          <pre v-if="result.output" class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
-          <pre v-else-if="result.error" class="whitespace-pre-wrap break-all text-bad">{{ result.error }}</pre>
+          <pre v-if="result.output" class="whitespace-pre-wrap break-words text-terminal-text">{{ result.output }}</pre>
+          <pre v-else-if="result.error" class="whitespace-pre-wrap break-words text-bad">{{ result.error }}</pre>
         </div>
       </template>
     </ResultDialog>

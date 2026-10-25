@@ -11,7 +11,7 @@ import type { RouteAddInput, RouteDeleteInput } from '#shared/schemas/route.sche
 // (the `echo "..."` steps inside its `configure terminal … exit` block), WITHOUT
 // the ssh/sshpass transport or any credential — those are n8n's concern. The ACL
 // / route list name is the fixed `KSEI-JMP`, and the route next-hop + metric are
-// the fixed values n8n uses (add: 192.197.120.1 1, delete: 10.100.100.5 1).
+// the fixed values n8n uses (add: 192.197.120.1 1, delete: 192.197.120.1 1).
 //
 // Credentials are intentionally NOT interpolated into the command lines. They are
 // device-session concerns handled inside n8n; the preview shows only the config
@@ -21,7 +21,7 @@ import type { RouteAddInput, RouteDeleteInput } from '#shared/schemas/route.sche
 const LIST_NAME = 'KSEI-JMP'
 /** Fixed route next-hop + metric per n8n (add and delete differ). */
 const ROUTE_ADD_NEXTHOP = '192.197.120.1 1'
-const ROUTE_DELETE_NEXTHOP = '10.100.100.5 1'
+const ROUTE_DELETE_NEXTHOP = '192.197.120.1 1'
 
 function joinAddr(addr: string, mask?: string): string {
   return mask ? `${addr} ${mask}` : addr
@@ -174,7 +174,7 @@ export function renderRouteAdd(f: RouteAddInput): string[] {
   ]
 }
 
-/** ROUTE DELETE preview — `no route KSEI-JMP <ip[ mask]> 10.100.100.5 1`. */
+/** ROUTE DELETE preview — `no route KSEI-JMP <ip[ mask]> 192.197.120.1 1`. */
 export function renderRouteDelete(f: RouteDeleteInput): string[] {
   const route = joinAddr(f.routeIp, f.routeMask)
   return [

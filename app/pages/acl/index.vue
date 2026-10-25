@@ -196,7 +196,7 @@ async function runSearch() {
     <section v-else-if="result && result.status === 'FAILED'" class="flex flex-col gap-3">
       <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
         <p class="text-bad">✗ Search failed</p>
-        <pre class="mt-1 whitespace-pre-wrap break-all text-bad">{{ result.error ?? result.message ?? 'Unknown error' }}</pre>
+        <pre class="mt-1 whitespace-pre-wrap break-words text-bad">{{ result.error ?? result.message ?? 'Unknown error' }}</pre>
       </div>
     </section>
 
@@ -238,7 +238,7 @@ async function runSearch() {
     <section v-else-if="result && result.output" class="flex flex-col gap-3">
       <h2 class="text-base font-semibold text-ink">Search Result</h2>
       <div class="rounded-lg bg-terminal p-4 font-mono text-xs leading-relaxed">
-        <pre class="whitespace-pre-wrap break-all text-terminal-text">{{ result.output }}</pre>
+        <pre class="whitespace-pre-wrap break-words text-terminal-text">{{ result.output }}</pre>
       </div>
     </section>
 
