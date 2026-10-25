@@ -65,7 +65,7 @@ device-configuration storage (there is none).
 
 1. THE schema SHALL define `auth_provider` as `['LOCAL', 'AD']`.
 2. THE schema SHALL define `mfa_type` as `['TOTP']`.
-3. THE schema SHALL define `audit_module` as `['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N']`.
+3. THE schema SHALL define `audit_module` as `['AUTH', 'USER', 'ACL', 'ROUTE', 'N8N', 'TIME_RANGE']` (`TIME_RANGE` was appended by a later migration via `ALTER TYPE ... ADD VALUE` for the standalone Time Range page's add/delete operations; existing values are never reordered).
 4. THE schema SHALL define `audit_action` as `['LOGIN', 'SHOW', 'ADD', 'DELETE', 'UPDATE', 'LOGOUT', 'MFA_VERIFY']`, in that order (`LOGOUT` then `MFA_VERIFY` were appended by later migrations via `ALTER TYPE ... ADD VALUE`; existing values are never reordered).
 5. THE schema SHALL define `audit_status` as `['SUCCESS', 'FAILED']`.
 6. THE schema SHALL define `exec_log_action` as `['SHOW', 'ADD', 'DELETE']` and `exec_log_status` as `['SUCCESS', 'FAILED']`, declared ONCE in `acl-logs.ts` and imported by `route-logs.ts` (Postgres enum names are global and SHALL NOT be redefined).
@@ -133,7 +133,7 @@ device-configuration storage (there is none).
 1. THE `sessions` table SHALL have: `session_id` (uuid PK, default random), `user_id` (uuid, not null, FK → `users.user_id`, ON DELETE CASCADE), `token_hash` (text, not null — SHA-256 of the raw token), `expires_at` (timestamptz, not null), `created_at` (timestamptz, not null, default now()), `last_used_at` (timestamptz, nullable), `source_ip` (varchar 64, nullable), `user_agent` (varchar 512, nullable), `device_cred_encrypted` (text, nullable), `device_cred_expires_at` (timestamptz, nullable).
 2. THE raw session token SHALL NEVER be stored; only `token_hash` (SHA-256) is persisted, and the raw token lives solely in the `netops_session` HttpOnly cookie.
 3. A `sessions` row SHALL exist only after MFA has succeeded.
-4. THE `device_cred_encrypted` column SHALL hold AES-256-GCM ciphertext of the engineer's device username/password (for read operations), never cleartext and never audited/logged; the credentials are removed with the row on logout/expiry or cleared manually. (`device_cred_expires_at` is retained in the schema but the device credentials currently live for the login-session lifetime — see n8n-integration/.)
+4. THE `device_cred_encrypted` column SHALL hold AES-256-GCM ciphertext of the engineer's device username/password (for read operations), never cleartext and never audited/logged; `device_cred_expires_at` SHALL hold their bounded TTL (`DEVICE_CRED_TTL_MINUTES`, default 30 — see n8n-integration/). The credentials are treated as absent once `device_cred_expires_at` lapses (cleared on the next read), and are also removed with the row on logout/session-end or cleared manually.
 5. THE table SHALL enforce a UNIQUE index on `token_hash` (`sessions_token_hash_uidx`) and non-unique indexes on `user_id` (`sessions_user_id_idx`) and `expires_at` (`sessions_expires_at_idx`).
 
 ### Requirement 9: `audit_logs` table (Audit_Core — master system of record)

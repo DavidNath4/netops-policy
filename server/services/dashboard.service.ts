@@ -19,6 +19,13 @@ import { auditLogs } from '~~/database/schema/audit-logs'
  *   - getTopUsers            — most active users (grouped by username).
  *   - getRecentConfigChanges — newest config mutations (safe projection).
  *
+ * "Activity" means network-policy work only — any action on the ACL and ROUTE
+ * modules (module IN ('ACL','ROUTE')). AUTH (login/logout), USER, N8N, and
+ * standalone TIME_RANGE rows are EXCLUDED from the activity widgets (getKpi's
+ * total/success, getActivitySeries, getTopUsers) so they measure policy work,
+ * not sign-ins or supporting-object maintenance. A time range created inline
+ * with an ACL add is recorded under module 'ACL', so it is already counted.
+ *
  * A "config change" is a real device-policy mutation:
  *   module IN ('ACL','ROUTE') AND action IN ('ADD','DELETE').
  *
@@ -119,6 +126,13 @@ function rate(success: number, total: number): number {
 const inThisMonth = sql`${auditLogs.createdAt} >= date_trunc('month', now())`
 const inLastMonth = sql`${auditLogs.createdAt} >= date_trunc('month', now()) - interval '1 month' and ${auditLogs.createdAt} < date_trunc('month', now())`
 const isConfigChange = sql`${auditLogs.module} in ('ACL','ROUTE') and ${auditLogs.action} in ('ADD','DELETE')`
+// "Activity" means network-policy work only: every action (SHOW/ADD/DELETE/…)
+// on the ACL and ROUTE modules. AUTH (login/logout), USER, N8N, and TIME_RANGE
+// rows are deliberately excluded so the activity widgets measure policy work,
+// not sign-ins or supporting-object maintenance. A time range created inline
+// with an ACL add is recorded under module 'ACL', so it is already counted here;
+// standalone TIME_RANGE rows are not.
+const isPolicyActivity = sql`${auditLogs.module} in ('ACL','ROUTE')`
 
 /**
  * Dashboard KPI snapshot.
@@ -131,10 +145,10 @@ const isConfigChange = sql`${auditLogs.module} in ('ACL','ROUTE') and ${auditLog
 export async function getKpi(db: Database): Promise<Kpi> {
   const kpiRows = await db
     .select({
-      totalThis: sql<number>`count(*) filter (where ${inThisMonth})`,
-      totalLast: sql<number>`count(*) filter (where ${inLastMonth})`,
-      successThis: sql<number>`count(*) filter (where ${auditLogs.status} = 'SUCCESS' and ${inThisMonth})`,
-      successLast: sql<number>`count(*) filter (where ${auditLogs.status} = 'SUCCESS' and ${inLastMonth})`,
+      totalThis: sql<number>`count(*) filter (where ${isPolicyActivity} and ${inThisMonth})`,
+      totalLast: sql<number>`count(*) filter (where ${isPolicyActivity} and ${inLastMonth})`,
+      successThis: sql<number>`count(*) filter (where ${isPolicyActivity} and ${auditLogs.status} = 'SUCCESS' and ${inThisMonth})`,
+      successLast: sql<number>`count(*) filter (where ${isPolicyActivity} and ${auditLogs.status} = 'SUCCESS' and ${inLastMonth})`,
       cfgThis: sql<number>`count(*) filter (where ${isConfigChange} and ${inThisMonth})`,
       cfgLast: sql<number>`count(*) filter (where ${isConfigChange} and ${inLastMonth})`,
     })
@@ -185,6 +199,7 @@ export async function getActivitySeries(db: Database): Promise<ActivitySeries> {
     from buckets
     left join ${auditLogs}
       on date_trunc('day', ${auditLogs.createdAt}) = buckets.b
+      and ${isPolicyActivity}
     group by buckets.b
     order by buckets.b
   `)
@@ -204,6 +219,7 @@ export async function getActivitySeries(db: Database): Promise<ActivitySeries> {
     from buckets
     left join ${auditLogs}
       on date_trunc('week', ${auditLogs.createdAt}) = buckets.b
+      and ${isPolicyActivity}
     group by buckets.b
     order by buckets.b
   `)
@@ -223,6 +239,7 @@ export async function getActivitySeries(db: Database): Promise<ActivitySeries> {
     from buckets
     left join ${auditLogs}
       on date_trunc('month', ${auditLogs.createdAt}) = buckets.b
+      and ${isPolicyActivity}
     group by buckets.b
     order by buckets.b
   `)
@@ -268,6 +285,7 @@ export async function getTopUsers(db: Database): Promise<TopUsersResult> {
   const users = await db
     .select({ username: auditLogs.username, count: count() })
     .from(auditLogs)
+    .where(isPolicyActivity)
     .groupBy(auditLogs.username)
     .orderBy(desc(sql`count(*)`))
     .limit(8)

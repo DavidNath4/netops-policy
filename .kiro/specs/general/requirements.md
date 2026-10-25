@@ -139,7 +139,7 @@ module docs.
 #### Acceptance Criteria
 
 1. WHEN the application starts, THE Config_Service SHALL validate the environment against the Zod `EnvSchema`, and SHALL halt startup if a required variable is missing or invalid.
-2. THE Config_Service SHALL validate at least `NODE_ENV`, the discrete PostgreSQL connection parts (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`), `SESSION_SECRET` (min 32 chars), `COOKIE_SECURE`, `MFA_ENCRYPTION_KEY` (64 hex chars), `SESSION_TTL_HOURS`, `MFA_CHALLENGE_TTL_MINUTES`, the Active Directory variables (`AD_ENABLED`, `AUTH_LOCAL_ENABLED`, `AD_URL`, `AD_BASE_DN`, `AD_BIND_DN`, `AD_BIND_PASSWORD`, `AD_TIMEOUT_MS`), the n8n variables (`N8N_BASE_URL`, `N8N_API_KEY`, `N8N_TIMEOUT_MS`), and the optional iTop variables (`ITOP_HOST`, `ITOP_PORT`, `ITOP_NAME`, `ITOP_USER`, `ITOP_PASSWORD`, `ITOP_TIMEOUT_MS`).
+2. THE Config_Service SHALL validate at least `NODE_ENV`, the discrete PostgreSQL connection parts (`DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`), `SESSION_SECRET` (min 32 chars), `COOKIE_SECURE`, `MFA_ENCRYPTION_KEY` (64 hex chars), `SESSION_TTL_HOURS`, `MFA_CHALLENGE_TTL_MINUTES`, `DEVICE_CRED_TTL_MINUTES` (the Device Session Credentials TTL — see `n8n-integration/`), the Active Directory variables (`AD_ENABLED`, `AUTH_LOCAL_ENABLED`, `AD_URL`, `AD_BASE_DN`, `AD_BIND_DN`, `AD_BIND_PASSWORD`, `AD_TIMEOUT_MS`), the n8n variables (`N8N_BASE_URL`, `N8N_API_KEY`, `N8N_TIMEOUT_MS`), and the optional iTop variables (`ITOP_HOST`, `ITOP_PORT`, `ITOP_NAME`, `ITOP_USER`, `ITOP_PASSWORD`, `ITOP_TIMEOUT_MS`).
 3. THE Config_Service SHALL assemble `DATABASE_URL` from the discrete `DB_*` parts (percent-encoding the user and password) rather than reading a pre-built URL, and SHALL assemble `ITOP_DATABASE_URL` from the `ITOP_*` parts only when iTop is fully configured.
 4. WHERE `AD_ENABLED` is true, THE Config_Service SHALL require `AD_URL`, `AD_BASE_DN`, `AD_BIND_DN`, and `AD_BIND_PASSWORD` to all be present (see the `authentication/` spec).
 5. THE Config_Service SHALL treat iTop as all-or-nothing: either none of `ITOP_HOST` / `ITOP_NAME` / `ITOP_USER` / `ITOP_PASSWORD` are set (feature off) or all four are set; a partial iTop configuration SHALL halt startup (see the `ticketing-itop/` spec).
@@ -172,7 +172,8 @@ module docs.
 
 ## Cross-link index
 
-The ten module specs. Each folder holds exactly one `requirements.md`.
+The module specs. Each folder holds exactly one `requirements.md`. (Ten are
+delivered; `notifications/` is an eleventh DRAFT — planning only, not yet built.)
 
 - **general/** (this document) — system overview, architecture, layering, envelope, correlation id, config, packaging, and the shared glossary.
 - **database/** — the full PostgreSQL schema: every table, enum, relationship, index, delete behavior, plus the migration and seed posture.
@@ -181,6 +182,7 @@ The ten module specs. Each folder holds exactly one `requirements.md`.
 - **netops-policy-manager/** — the ACL and ROUTE module: show/add/delete workflow, the simplified field set, command preview, and network-input validation.
 - **n8n-integration/** — the authenticated n8n webhook contract, field payloads, correlation id header, device session credentials, and the execute guard.
 - **ticketing-itop/** — the read-only iTop MariaDB ticket search/preview, the required change-ticket gate, and the server-side ticket-existence guard.
-- **log-trail/** — the `audit_logs` master table, the `acl_logs` / `route_logs` detail tables, the two-row AUTH model, and the `/logs` UI.
+- **log-trail/** — the `audit_logs` master table, the `acl_logs` / `route_logs` detail tables, the two-row AUTH model, and the `/audit-trail` UI.
 - **user-management/** — the Administration user list, role/status changes, and the disabled create / password-reset posture.
 - **dashboard/** — the independent dashboard widget endpoints derived from `audit_logs`, one subsection per widget.
+- **notifications/** — **DRAFT / under discussion, not scheduled** — planning capture for the header notification bell and the opt-in email notifications (both currently UI-only placeholders); recommended design derives the feed from `audit_logs`, filtered per permission.

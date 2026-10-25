@@ -8,6 +8,14 @@ the application is the audit system of record and NOT the source of truth for
 device state, every dashboard number summarizes recorded ACTIVITY (operations and
 their outcomes), not counts of ACLs or routes on devices.
 
+**"Activity" is scoped to network-policy work only** — rows whose `module IN
+('ACL','ROUTE')`, for ANY action (SHOW/ADD/DELETE/…). `AUTH` (login/logout),
+`USER`, `N8N`, and standalone `TIME_RANGE` rows are EXCLUDED from the activity
+widgets, so the dashboard measures policy work rather than sign-ins or
+supporting-object maintenance. A time range created inline with an ACL add is
+recorded under `module = 'ACL'`, so it is already counted as ACL activity; only
+standalone `TIME_RANGE` rows (created from the Time Range page) are excluded.
+
 The dashboard is composed of **five independent widgets**, each backed by its own
 auth-only endpoint and each fetching in parallel with its own loading / error /
 empty state. `app/pages/index.vue` is a thin composing page that places the
@@ -29,7 +37,8 @@ common access).
 ## Glossary
 
 - **Dashboard_Service**: The server component (`server/services/dashboard.service.ts`) exposing `getKpi`, `getActivitySeries`, `getConfigByOperation`, `getTopUsers`, and `getRecentConfigChanges`, each aggregating over `audit_logs`.
-- **Config_Change**: A real device-policy mutation — `module IN ('ACL','ROUTE') AND action IN ('ADD','DELETE')`. Used by the KPI, Config-by-Operation, and Recent-Config-Changes widgets.
+- **Policy_Activity**: Any audit row where `module IN ('ACL','ROUTE')`, for ANY action. This is the scope of the "activity" widgets (KPI total/success rate, Activity Over Time, Top Active Users). It EXCLUDES `AUTH`, `USER`, `N8N`, and standalone `TIME_RANGE` rows.
+- **Config_Change**: A real device-policy mutation — `module IN ('ACL','ROUTE') AND action IN ('ADD','DELETE')`. A stricter subset of Policy_Activity. Used by the KPI config-changes card, Config-by-Operation, and Recent-Config-Changes widgets.
 - **Widget**: A self-contained SFC under `app/components/dashboard/` that owns one fetch and its own loading/error/empty state.
 
 ## Requirements
@@ -44,6 +53,7 @@ common access).
 2. THE five widgets SHALL each fetch an INDEPENDENT endpoint in parallel and SHALL each render its own loading, error, and empty state.
 3. `app/pages/index.vue` SHALL be a thin composing page that places the widget components and holds no data-fetching logic.
 4. THE Dashboard_Service SHALL derive every value by SQL aggregation over `audit_logs`; nothing SHALL be hardcoded or read from device state.
+6. THE activity widgets (KPI `totalActivity`/`successRate`, Activity Over Time, and Top Active Users) SHALL count only Policy_Activity rows (`module IN ('ACL','ROUTE')`) and SHALL exclude `AUTH`, `USER`, `N8N`, and standalone `TIME_RANGE` rows.
 5. WHERE a widget renders a chart, it SHALL use the `nuxt-charts` `<BarChart>` wrapped in `<ClientOnly>` (with a loading fallback) so the chart renders only in the browser.
 
 ### Requirement 2: Component inventory
@@ -64,7 +74,7 @@ common access).
 
 1. THE `GET /api/dashboard/kpi` endpoint SHALL return `getKpi` as `{ totalActivity, configChanges, successRate }`, each a `{ value, delta }` pair.
 2. `value` SHALL be computed for the CURRENT calendar month and `delta` SHALL be `(current month − previous month)`; month boundaries SHALL be evaluated in the database (`date_trunc('month', now())`) over `created_at` (timestamptz).
-3. `totalActivity.value` SHALL be the count of all audit rows this month; `configChanges.value` SHALL be the count of Config_Change rows this month; `successRate.value` SHALL be `round(SUCCESS / total * 100)` for the month (0 when the window is empty).
+3. `totalActivity.value` SHALL be the count of Policy_Activity rows (`module IN ('ACL','ROUTE')`) this month; `configChanges.value` SHALL be the count of Config_Change rows this month; `successRate.value` SHALL be `round(SUCCESS / total * 100)` over Policy_Activity rows for the month (0 when the window is empty).
 4. `successRate.delta` SHALL be a percentage-point change (this month's rate − last month's rate); the activity and config deltas SHALL be count differences.
 5. THE three cards SHALL render through `KpiStatCard`; the success-rate delta tone SHALL be semantic (positive/negative), while the volume deltas SHALL be neutral.
 
@@ -75,7 +85,7 @@ common access).
 #### Acceptance Criteria
 
 1. THE `GET /api/dashboard/activity-series` endpoint SHALL return `getActivitySeries` as `{ daily, weekly, monthly }`, each an array of `{ bucket, count }` points, in ONE response.
-2. THE windows SHALL be: daily = last 14 days, weekly = last 12 ISO weeks, monthly = last 12 months; each series SHALL be ZERO-FILLED via `generate_series` so every bucket in the window is present (periods with no activity render as a 0 bar).
+2. THE windows SHALL be: daily = last 14 days, weekly = last 12 ISO weeks, monthly = last 12 months; each series SHALL be ZERO-FILLED via `generate_series` so every bucket in the window is present (periods with no activity render as a 0 bar). Each bucket SHALL count only Policy_Activity rows (`module IN ('ACL','ROUTE')`), applied as part of the `LEFT JOIN` condition so empty buckets stay zero-filled.
 3. THE bucket keys SHALL be `YYYY-MM-DD` (daily), `IYYY-"W"IW` (weekly), and `YYYY-MM` (monthly), produced by `date_trunc` + `to_char`.
 4. THE widget SHALL expose a Daily / Weekly / Monthly toggle that switches the already-fetched series CLIENT-SIDE with no refetch.
 5. THE widget SHALL render a `<BarChart>` in `<ClientOnly>` whose series color is `#2563eb` (category name "Activity"), remounting on granularity change (keyed) to clear stale tooltip state.
@@ -98,7 +108,7 @@ common access).
 #### Acceptance Criteria
 
 1. THE `GET /api/dashboard/top-users` endpoint SHALL return `getTopUsers` as `{ items: { username, count }[] }`.
-2. THE results SHALL be grouped by `username`, ordered by activity count descending, and limited to the top 8; a null username SHALL be presented as `—`.
+2. THE results SHALL count only Policy_Activity rows (`module IN ('ACL','ROUTE')`), grouped by `username`, ordered by activity count descending, and limited to the top 8; a null username SHALL be presented as `—`.
 3. THE widget SHALL render a compact ranked list (no chart) with its own loading/error/empty states.
 
 ### Requirement 7: Widget — Recent Config Changes (`GET /api/dashboard/recent-config-changes`)

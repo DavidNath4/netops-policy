@@ -73,7 +73,7 @@ const allLinks: NavLink[] = [
     ],
   },
   { label: 'Administration', to: '/administration', icon: 'i-lucide-users', permission: 'ADMINISTRATION_SHOW' },
-  { label: 'Log Trail', to: '/logs', icon: 'i-lucide-scroll-text' },
+  { label: 'Log Trail', to: '/audit-trail', icon: 'i-lucide-scroll-text' },
 ]
 
 // Gate by permission: a link with no `permission` is always shown; otherwise the

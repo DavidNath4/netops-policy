@@ -29,12 +29,14 @@ Related specs:
 
 ### Scope
 
-In scope: the ACL and ROUTE show/add/delete workflow, the current simplified
-field sets, the server command preview + redaction, the client-side existence
-pre-check, the locked IP/mask inputs, the network-input validation schemas, and
-the ACL/ROUTE UX states. Out of scope here (owned elsewhere): the n8n webhook
-contract, the iTop ticket integration, authentication/RBAC, the audit schema, and
-the dashboard.
+In scope: the ACL and ROUTE show/add/delete workflow, the Bulk Add ACL batch
+workflow, the standalone Time Range page (create/delete time-range objects), the
+current simplified field sets, the server command preview + redaction, the
+client-side existence pre-check, the locked IP/mask inputs, the network-input
+validation schemas, and the ACL/ROUTE UX states. Out of scope here (owned
+elsewhere): the n8n webhook contract (including the time-range webhooks), the
+iTop ticket integration, authentication/RBAC, the audit schema, and the
+dashboard.
 
 ## Glossary
 
@@ -48,7 +50,9 @@ Module-specific terms. Shared terms (`NetOps_Policy_Manager`, `Correlation_Id`,
 - **Command_Template**: One of four static command shapes maintained in `server/network/command-templates.ts` — ACL add, ACL delete, route add, route delete — with placeholders for field values. Preview only. The lines mirror the exact device command lines n8n runs (the `echo "…"` steps inside its `configure terminal … exit` block) WITHOUT the ssh/sshpass transport or any credential, which are n8n's concern. The access-list / route list name is the fixed `KSEI-JMP`, and the route next-hop + metric are n8n's fixed values (add `192.197.120.1 1`, delete `192.197.120.1 1`); these are hardcoded in the template. The concrete per-operation shapes are enumerated in Requirement 3.
 - **Acl_Ip_AutoCorrect**: The pure, idempotent prefix-rewrite applied to ACL ADD Source/Destination IPs — defined once in `shared/schemas/network.schema.ts` (`autoCorrectAclIp`) and applied on the form (on blur) and re-applied server-side. See Requirement 9.
 - **Execution_Credentials**: The per-engineer device username/password forwarded to n8n so it can act as that engineer. For add/delete they are supplied per operation and never persisted; for reads they are auto-filled from the Device_Session_Credentials (n8n-integration spec, Req 11). Never returned to the client (except the owner's reveal) and never written to audit; always `***` in previews/audit.
-- **Device_Session_Credentials**: The engineer's device username/password entered once per login session and held AES-256-GCM-encrypted on the session row for the life of that session, auto-filled by the server for read operations. Specified fully in the n8n-integration spec (Req 11).
+- **Device_Session_Credentials**: The engineer's device username/password entered once and held AES-256-GCM-encrypted on the session row with a bounded TTL (`DEVICE_CRED_TTL_MINUTES`, default 30), auto-filled by the server for read operations. Specified fully in the n8n-integration spec (Req 11).
+- **Bulk_Add_ACL**: Adding several Source→Destination pairs in ONE batch under ONE iTop ticket and ONE set of device credentials (`/acl/add-bulk`). It is NOT a new n8n contract — the service loops the existing per-direction `acl/add` call. See Requirement 11.
+- **Time_Range_Object**: A standalone device `time-range` object (name + absolute end date/time). It can be created/deleted on its own from the Time Range page, or referenced/defined inline by an ACL ADD. See Requirement 12.
 - **changeTicket**: A required change-ticket reference on every ACL/ROUTE add and delete, carrying the selected iTop ticket `ref` (e.g. `C-035919`). It is audited but not sent to n8n. The ticket picker and the server-side existence guard are specified in the ticketing-itop spec.
 - **Validation_Layer**: The reusable Zod schemas in `shared/schemas/network.schema.ts` used to validate network input on the form and re-validate it on the server.
 
@@ -217,9 +221,9 @@ The Validation_Layer schemas live in `shared/schemas/network.schema.ts` and are 
 
 #### Acceptance Criteria
 
-1. THE API_Layer SHALL expose the singular ACL endpoints `POST /api/acl/show`, `POST /api/acl/preview`, and `POST /api/acl/execute`.
+1. THE API_Layer SHALL expose the singular ACL endpoints `POST /api/acl/show`, `POST /api/acl/preview`, and `POST /api/acl/execute`, plus the Bulk Add ACL endpoints `POST /api/acl/bulk-preview` and `POST /api/acl/bulk-execute` (Requirement 11) and the Time Range endpoints `POST /api/acl/time-ranges`, `POST /api/acl/time-range-preview`, `POST /api/acl/time-range-add`, `POST /api/acl/time-range-delete`, `POST /api/acl/time-range-usage`, and `POST /api/acl/time-range-overview` (Requirement 12; n8n-integration spec Req 15–18).
 2. THE API_Layer SHALL expose the singular route endpoints `POST /api/route/show`, `POST /api/route/preview`, and `POST /api/route/execute`.
-3. THE show endpoints SHALL be gated by `*_SHOW`; preview and execute SHALL be gated by `*_ADD` or `*_DELETE` according to the submitted `operation`.
+3. THE show endpoints SHALL be gated by `*_SHOW`; preview and execute SHALL be gated by `*_ADD` or `*_DELETE` according to the submitted `operation`. The bulk endpoints SHALL be gated by `ACL_POLICIES_ADD`; the time-range endpoints SHALL be gated per Requirement 12 (overview/list by `ACL_POLICIES_SHOW`, add/preview by `ACL_POLICIES_ADD`, delete/usage by `ACL_POLICIES_DELETE`).
 4. THE preview and execute endpoints SHALL accept only the ADD/DELETE discriminated-union request shapes; SHOW SHALL have no preview.
 5. Every ACL/ROUTE mutation endpoint SHALL apply the same-origin check (`assertSameOrigin`) in addition to the permission check.
 
@@ -272,6 +276,38 @@ The reverse direction uses the same `changeTicket` and the same time range as th
 7. WHEN the user enables Bidirectional, THE Frontend existence pre-check SHALL check BOTH directions and auto-skip any that already exists: both absent → run both; exactly one exists → warn and run only the missing direction; both exist → warn and run neither. The bidirectional checkbox SHALL stay ON in all cases (it reflects the user's intent, not execution state); the run plan narrows what actually executes.
 8. THE bidirectional toggle SHALL be a label-row checkbox on the ACL add page, placed below the Ticket Change field and above the Generate button.
 
+### Requirement 11: Bulk Add ACL (batch)
+
+**User Story:** As a network engineer, I want to add several Source→Destination pairs in one submission under one change ticket, so that I can apply a set of related ACLs without running the single-add form repeatedly.
+
+Bulk Add (`/acl/add-bulk`) is ADD-only (SHOW/DELETE are untouched). It is NOT a new n8n contract: the service maps each row to the SAME single-ADD input shape and loops the existing per-direction `acl/add` call (exactly as the bidirectional ADD does), so each direction keeps its own Correlation_Id and its own master + `acl_logs` audit row.
+
+#### Acceptance Criteria
+
+1. THE Bulk_Add_ACL request SHALL carry `items[]` plus the batch-global `changeTicket` and Execution_Credentials; each row carries `source`, `sourceMask?`, `destination`, `destinationMask?`, an optional per-row `timeRange` (same `new`/`existing` modes as a single ADD), and an optional per-row `bidirectional`. A row SHALL NOT carry its own ticket or credentials.
+2. THE request MAY carry an optional batch-global `globalTimeRange` that is `existing`-mode ONLY (pick an on-device object by name, never a new object); when present it OVERRIDES each row's own `timeRange` and the per-row time-range control is disabled in the UI.
+3. THE batch SHALL be bounded to at most `ACL_BULK_MAX_DIRECTIONS` (20) DIRECTIONS, counted as the SUM over rows where each row is 1 direction, or 2 when its own `bidirectional` is on (so a mixed batch may total an odd number); the Zod schema SHALL enforce this ceiling.
+4. THE API_Layer SHALL expose `POST /api/acl/bulk-preview` and `POST /api/acl/bulk-execute`, both gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_ADD)` (bulk is ADD-only).
+5. THE bulk PREVIEW SHALL classify every row as `NEW`, `EXISTS`, or `TR_DUPLICATE` and render its redacted command with NO audit and NO n8n execute, applying the SAME per-row existence pre-check (`aclAddAlreadyExists`, honoring `bidirectional`), the SAME 0.0.0.0/0 (any) rejection, and a "Create New" time-range name clash check (against the device AND within the batch); `hasBlocking` SHALL be true when any row is not `NEW`.
+6. THE bulk EXECUTE SHALL be ALL-OR-NOTHING AT THE GATE: it SHALL verify the iTop ticket ONCE, then re-check EVERY row (any-address, same-endpoint, existence, time-range clash) up front; if ANY row is blocking it SHALL reject the WHOLE batch with `ACL_BULK_HAS_BLOCKING` (HTTP 409, carrying the blocking row indexes in `error.fields.items`) and execute NOTHING.
+7. WHEN every row is clean, THE service SHALL execute each row via the existing per-direction path (forward, then reverse when the row is bidirectional), stamping ONE shared `batchId` onto every row's audit payload for Log-Trail grouping. There SHALL be NO cross-row transaction and NO rollback once execution starts: a row that fails at the n8n call SHALL be recorded FAILED while the others still run, and `allOk` SHALL be true only when every direction of every row succeeded.
+8. THE single-add, bidirectional, delete, and all route flows SHALL be unchanged by Bulk Add.
+
+### Requirement 12: Standalone Time Range page (create/delete time-range objects)
+
+**User Story:** As a network engineer, I want to create and delete the device's standalone time-range objects from a dedicated page, so that I can manage reusable windows independently of adding an ACL rule.
+
+The Time Range page (`/acl/time-range`) lists the device's existing time-range objects with their end detail and usage count, and lets the engineer add a new object or delete an unused one. These operations are delegated to n8n (`time/add`, `time/safeDelete`, with `time/show` + `time/isUsed` for the listing — n8n-integration spec, Req 15–18) and audited under the `TIME_RANGE` module (log-trail spec, Req 6a). This is DISTINCT from a time range created INLINE with an ACL ADD, which is part of that ACL operation and audited as `ACL` (Requirement 7a).
+
+#### Acceptance Criteria
+
+1. THE Time Range page SHALL be reached from the ACL Policies menu group and SHALL be gated for viewing by `ACL_POLICIES_SHOW` (overview/list), for adding by `ACL_POLICIES_ADD`, and for deleting by `ACL_POLICIES_DELETE` (DELETE is destructive; NOC, which lacks `*_DELETE`, SHALL NOT delete).
+2. THE page SHALL load a read-only overview (`listTimeRangeOverview`) that combines the device catalog and per-object usage into one list — each object with its end date/time, usage count, and the ACL rules that reference it — writing no audit row.
+3. THE ADD form SHALL support TWO naming modes: `date` (derive the object name `dd-mmm-yyyy` from the picked date, exactly like the ACL Add "Create New" flow) and `named` (a typed name matching `^[A-Za-z0-9._-]+$`, no spaces). Both derive the same three wire keys (`objectName`, `date`, `time`) via the shared `deriveAclTimeRange` so the format matches the ACL Add contract.
+4. THE ADD SHALL run a fail-closed duplicate pre-check and reject a name already on the device with `TIME_RANGE_EXISTS` (HTTP 409) before calling n8n (writing no audit row), and SHALL ALSO surface n8n's `OBJECT_ALREADY_EXISTS` as the same 409 after the attempt is audited; each attempted add/delete SHALL write exactly ONE master `TIME_RANGE` audit row (no detail table).
+5. THE DELETE SHALL delegate to the n8n `time/safeDelete` webhook, which REFUSES when ACL rules still reference the object and RETURNS those rules; the UI SHALL disable Delete when the loaded `usageCount > 0`, and `safeDelete` SHALL be the device-side safety net for the race where a rule is added after the table loaded. On an in-use refusal the blocking ACL rules SHALL be surfaced to the page.
+6. THE ADD/DELETE device command previews SHALL be the standalone object block — ADD: `configure terminal` / `time-range <objectName>` / `absolute end <time> <date>` / `end` / `exit`; DELETE: `configure terminal` / `no time-range <objectName>` / `end` / `exit` — display/audit-only and credential-free.
+
 ## Non-Functional Requirements
 
 ### Security
@@ -289,5 +325,5 @@ The reverse direction uses the same `changeTicket` and the same time range as th
 1. Direct execution against devices by this application (delegated to n8n; see the general/ and n8n-integration specs).
 2. Any in-app SSH/NETCONF/Ansible/NAPALM/Netmiko client or jump-host connection (these live in n8n).
 3. Storing device SSH credentials or persisting ACL/route configuration state (the app stores audit logs only).
-4. The protocol/port/action/time-range/next-hop/policy fields of the earlier draft — not part of the current contract.
+4. The protocol/port/action/next-hop/policy fields of the earlier draft (an ACL ADD time range and the standalone Time Range page ARE in the current contract — Requirements 7a and 12) — not part of the current contract.
 5. Approval / multi-stage sign-off beyond the single execute confirmation step.

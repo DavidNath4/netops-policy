@@ -42,7 +42,7 @@ here (Requirement 12).
 - **Webhook_Endpoint**: An n8n webhook URL that receives one operation, resolved per operation as `<N8N_BASE_URL>/<module>/<action>` in lowercase (e.g. `<base>/acl/show`, `<base>/route/add`).
 - **Field_Payload**: The JSON body the application sends to n8n for one operation — the operator's field values plus the execution credentials. It contains no rendered command string and no correlation id (the correlation id travels in a header).
 - **Execution_Credentials**: The per-engineer device `user` / `pass` used so n8n can act as that engineer. For add/delete they are supplied per operation and never persisted; for reads they are the Device_Session_Credentials (Requirement 11). Never returned to the client except via the owner's reveal, never logged, redacted to `***` in previews/audit.
-- **Device_Session_Credentials**: The engineer's device username/password, entered once on the ACL/Route show page and held AES-256-GCM-encrypted on that engineer's session row for the lifetime of the login session (no separate TTL). Auto-filled by the server for read operations, revealed only to the owner, removed on clear/logout/expiry, never audited.
+- **Device_Session_Credentials**: The engineer's device username/password, entered once on the ACL/Route show page and held AES-256-GCM-encrypted on that engineer's session row with a bounded TTL (`DEVICE_CRED_TTL_MINUTES`, default 30, independent of the session TTL). Auto-filled by the server for read operations, revealed only to the owner, removed on clear/logout/session-end or once the TTL lapses, never audited. The non-secret status reports the `expiresAt` the head-bar countdown ticks down to.
 - **N8N_API_Key**: A shared secret held by the application (server-side, from `N8N_API_KEY`) and by n8n, sent on every call in the `X-NetOps-Internal-Key` header to authenticate the app to n8n.
 - **Correlation_Id**: A UUID generated per operation, sent to n8n in the `x-correlation-id` header, and stored on the audit log.
 - **N8nResult**: The normalized result the N8N_Client returns: `{ status: SUCCESS | FAILED, output?, error?, message?, total?, items?, device? }`.
@@ -175,23 +175,23 @@ The N8N_Client unwraps an array-wrapped webhook response (`[{ ... }]`) and recog
 
 ### Requirement 11: Device Session Credentials (read operations)
 
-**User Story:** As a network engineer, I want to enter my device username/password once per login and have every read use it automatically until I log out, so that I don't re-type it for each lookup — while it stays protected.
+**User Story:** As a network engineer, I want to enter my device username/password once and have every read use it automatically for a bounded window, so that I don't re-type it for each lookup — while it stays protected and expires on its own.
 
-Read operations call n8n frequently, so requiring credentials on every call is impractical. An engineer sets them once per login session; the backend validates them once, then auto-fills them for reads for the life of the session. Add/delete are not covered here (Requirement 7.2). The service is `server/services/device-credential.service.ts`.
+Read operations call n8n frequently, so requiring credentials on every call is impractical. An engineer sets them once; the backend validates them once, then auto-fills them for reads until the bounded TTL (`DEVICE_CRED_TTL_MINUTES`, default 30) lapses or the session ends — whichever comes first. Add/delete are not covered here (Requirement 7.2). The service is `server/services/device-credential.service.ts`.
 
 #### Acceptance Criteria
 
 1. WHEN an authenticated engineer submits their device `execUsername` and `execPassword` to `POST /api/session/device-credentials`, THE application SHALL first validate them against the n8n `POST <base>/user/validate` webhook (with the `X-NetOps-Internal-Key` header), and only on `success: true` SHALL store them encrypted with AES-256-GCM on that engineer's session row.
 2. IF the `user/validate` call returns `success: false`, is unreachable, or times out, THEN THE application SHALL reject the set request with the returned message (or a safe generic error) and SHALL NOT store any credentials.
 3. THE application SHALL scope the Device_Session_Credentials to the engineer's own session only; another user's session SHALL never see or use them.
-4. THE Device_Session_Credentials SHALL remain valid for the lifetime of the login session with no separate TTL; they are present while the session is valid and absent once it ends. (A `device_cred_expires_at` column exists from the initial migration but is unused.)
+4. THE Device_Session_Credentials SHALL carry a bounded TTL from `DEVICE_CRED_TTL_MINUTES` (default 30), stored as `device_cred_expires_at`. They are usable while the session is valid AND the TTL has not lapsed; once `device_cred_expires_at` is in the past, `getDeviceCredentials` SHALL clear them and treat them as absent, so the next read re-prompts — the guarantee behind the head-bar countdown. They are also removed with the session row on logout/session-end.
 5. WHEN an engineer performs a read operation and Device_Session_Credentials exist, THE application SHALL decrypt them server-side and use them as the Execution_Credentials for the n8n call, without the client resending them and without re-validating.
 6. IF a read operation is attempted with no Device_Session_Credentials, THEN THE application SHALL reject it with `DEVICE_CREDENTIALS_REQUIRED` and prompt the engineer to enter them.
 7. WHEN the owning engineer calls `GET /api/session/device-credentials/reveal`, THE application SHALL return the decrypted values to that engineer only, and SHALL NOT expose them to any other user.
 8. WHEN the engineer calls `DELETE /api/session/device-credentials`, THE application SHALL clear the Device_Session_Credentials from the session row immediately.
 9. WHEN the engineer logs out or the session ends/expires, THE application SHALL ensure the Device_Session_Credentials are gone (they live on the session row and are removed with it).
 10. THE application SHALL never write the Device_Session_Credentials (cleartext or encrypted) to any audit log, and SHALL never log them.
-11. THE `GET /api/session/device-credentials` endpoint SHALL return only a non-secret status `{ set, username? }`; the password is returned only via the explicit owner reveal in criterion 7.
+11. THE `GET /api/session/device-credentials` endpoint SHALL return only a non-secret status `{ set, username?, expiresAt? }` (the `expiresAt` drives the head-bar countdown); the password is returned only via the explicit owner reveal in criterion 7.
 12. THE add/delete operations SHALL NOT auto-fill from the Device_Session_Credentials; they SHALL require the credentials per operation (Requirement 7.2).
 
 ### Requirement 12: ACL/Route audit-detail tables (summary; authoritative in log-trail/)
@@ -265,6 +265,41 @@ The ACL Delete "Generate" step, after confirming the rule exists, reads the matc
 5. THE application SHALL expose the check at `POST /api/acl/time-range-usage`, a thin handler gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_DELETE)` (POST, so credentials never appear in the URL/logs) that returns `{ usages }` via the standard envelope.
 6. THE time-range object name SHALL be derived client-side from the matched rule's rendered command as the token following the final `time-range ` (the device renders a time-bound rule as `... time-range <name>` at the end of the line). WHERE the matched rule has no time range, the usage check SHALL be skipped.
 7. THE warning SHALL list only the OTHER rules still using the object — the raw command(s) of the rule being deleted (either direction) SHALL be excluded before deciding whether to warn; the warning SHALL appear only when at least one other rule remains. The warning is advisory and SHALL NOT block generate or execute.
+
+### Requirement 17: Standalone time-range create (`time/add`)
+
+**User Story:** As a network engineer, I want to create a standalone time-range object on the device from the Time Range page, so that I can prepare a reusable window without attaching it to an ACL rule in the same step.
+
+The Time Range page (`/acl/time-range`) "Add" form creates a standalone
+`time-range` object (the SAME object an ACL Add "Create New" would define, but
+with no permit line). Unlike the read-only `time/show`/`time/isUsed` helpers,
+this CHANGES device state, so it reports real success/failure and is audited as
+`TIME_RANGE`/`ADD` (log-trail spec, Req 6a).
+
+#### Acceptance Criteria
+
+1. THE N8N_Client SHALL expose a bespoke helper (`addTimeRange`) that issues `POST <N8N_BASE_URL>/time/add` with body `{ user, pass, objectName, date, time }` and the `X-NetOps-Internal-Key: N8N_API_KEY` header, bounded by an `AbortController` timeout from `N8N_TIMEOUT_MS`, deriving the URL from `N8N_BASE_URL` (trailing slash tolerated). The `objectName`/`date`/`time` are the SAME three derived keys an ACL ADD "Create New" time range sends (netops-policy-manager spec); `user`/`pass` are the Device_Session_Credentials and SHALL NEVER be logged.
+2. THE helper SHALL tolerate an array-wrapped response and SHALL drive success from the `success` boolean (with HTTP ok); it SHALL surface a real `ok: false` with n8n's safe `message` on failure, and SHALL set an `alreadyExists` flag when n8n returns the error code `OBJECT_ALREADY_EXISTS`.
+3. THE helper SHALL NEVER throw: on any network/timeout/parse failure it SHALL resolve to `{ ok: false, message }` (e.g. `Time range add request timed out` / `n8n is unreachable`) so the handler returns a safe error rather than crashing.
+4. THE application SHALL expose the create at `POST /api/acl/time-range-add`, a thin handler gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_ADD)` that resolves the Device_Session_Credentials (rejecting `DEVICE_CREDENTIALS_REQUIRED` when absent) and delegates to `createTimeRange`.
+5. THE service SHALL run a fail-closed duplicate pre-check (`fetchTimeRanges`) and reject a name already on the device with `TIME_RANGE_EXISTS` (HTTP 409) BEFORE calling `time/add` (writing no audit row); it SHALL ALSO surface n8n's `OBJECT_ALREADY_EXISTS` as the same `TIME_RANGE_EXISTS` 409 after the attempt is audited.
+
+### Requirement 18: Standalone time-range safe-delete (`time/safeDelete`)
+
+**User Story:** As a network engineer, I want to delete a standalone time-range object safely, so that I never orphan an ACL rule that still references the window.
+
+The Time Range page row "Delete" removes a standalone object. n8n re-checks the
+device and REFUSES when any ACL rule still references the object, returning those
+rules so the page can warn. It CHANGES device state and is audited as
+`TIME_RANGE`/`DELETE` (log-trail spec, Req 6a).
+
+#### Acceptance Criteria
+
+1. THE N8N_Client SHALL expose a bespoke helper (`safeDeleteTimeRange`) that issues `POST <N8N_BASE_URL>/time/safeDelete` with body `{ user, pass, objectName }` and the `X-NetOps-Internal-Key: N8N_API_KEY` header, bounded by an `AbortController` timeout from `N8N_TIMEOUT_MS`, deriving the URL from `N8N_BASE_URL` (trailing slash tolerated). The `user`/`pass` are the Device_Session_Credentials and SHALL NEVER be logged.
+2. THE helper SHALL tolerate an array-wrapped response, drive success from the `success` boolean, set an `inUse` flag when n8n returns the error code `OBJECT_IN_USE`, and extract the blocking rules from `data` as `{ aclName, rawRule }[]` (well-formed rows only).
+3. THE helper SHALL NEVER throw: on any network/timeout/parse failure it SHALL resolve to `{ ok: false, inUse: false, blockingRules: [], message }` so the handler returns a safe error; it SHALL return the raw parsed n8n response for the (redacted) audit payload.
+4. THE application SHALL expose the delete at `POST /api/acl/time-range-delete`, a thin handler gated by `assertSameOrigin` + `requirePermission(ACL_POLICIES_DELETE)` (DELETE is destructive; NOC lacks it) that resolves the Device_Session_Credentials and delegates to `deleteTimeRange`; on an in-use refusal the blocking ACL rules SHALL be returned so the page can warn with them.
+5. THE Time Range page SHALL also read the catalog + per-object usage to render each object with its end detail and usage count (`listTimeRangeOverview`, combining `time/show` + `time/isUsed`), exposed at `POST /api/acl/time-range-overview` gated by `requirePermission(ACL_POLICIES_SHOW)`, read-only and writing no audit row; the UI disables Delete when the loaded `usageCount > 0`, and `safeDelete` is the device-side safety net for the race where a rule is added after the table loaded.
 
 ## Non-Functional Requirements
 

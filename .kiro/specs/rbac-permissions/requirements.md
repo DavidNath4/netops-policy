@@ -110,8 +110,8 @@ Scope:
 3. THE Frontend SHALL gate the Administration menu/view behind `ADMINISTRATION_SHOW` and the user-management actions behind `ADMINISTRATION_MANAGE`.
 4. THE Frontend SHALL always show the Dashboard and Log Trail menus to every authenticated user, without requiring any Permission.
 5. WHERE a user lacks the Permission for a menu or action, THE Frontend SHALL hide or disable it, and THE server SHALL still re-enforce the Permission on the corresponding request.
-6. THE sidebar (`app/components/layout/AppSidebar.vue`) SHALL present ACL Policies and Routes as parent GROUPS that are empty folders — each has NO page of its own and only expands/collapses — whose children are the real pages: ACL Policies → Show ACL (`/acl`), Add ACL (`/acl/add`), Delete ACL (`/acl/delete`); Routes → Show Route (`/routes`), Add Route (`/routes/add`), Delete Route (`/routes/delete`). The active highlight SHALL follow the open submenu by longest-prefix match, the parent branch SHALL stay highlighted while one of its children is active, and the branch SHALL auto-expand on the active route.
-7. THE folder-style menu SHALL NOT change RBAC/permissions: the parent group SHALL keep the `*_SHOW` visibility gate (so the whole group hides for a user without ACL/Route access) and each child SHALL keep its original permission — Show behind `*_SHOW`, Add behind `*_ADD`, Delete behind `*_DELETE`. The seeded roles, permissions, and mapping are unchanged.
+6. THE sidebar (`app/components/layout/AppSidebar.vue`) SHALL present ACL Policies and Routes as parent GROUPS that are empty folders — each has NO page of its own and only expands/collapses — whose children are the real pages: ACL Policies → Show ACL (`/acl`), Add ACL (`/acl/add`), Bulk Add ACL (`/acl/add-bulk`), Delete ACL (`/acl/delete`), Time Range (`/acl/time-range`); Routes → Show Route (`/routes`), Add Route (`/routes/add`), Delete Route (`/routes/delete`). The active highlight SHALL follow the open submenu by longest-prefix match, the parent branch SHALL stay highlighted while one of its children is active, and the branch SHALL auto-expand on the active route.
+7. THE folder-style menu SHALL NOT change RBAC/permissions: the parent group SHALL keep the `*_SHOW` visibility gate (so the whole group hides for a user without ACL/Route access) and each child SHALL keep its original permission — Show behind `*_SHOW`, Add and Bulk Add behind `ACL_POLICIES_ADD`, Delete behind `ACL_POLICIES_DELETE`, and Time Range behind `ACL_POLICIES_SHOW` (its view gate; add/delete within the page re-check `ACL_POLICIES_ADD`/`ACL_POLICIES_DELETE` on the server). The seeded roles, permissions, and mapping are unchanged.
 
 ### Requirement 7: Future-role support
 
@@ -178,6 +178,10 @@ ACL/Route endpoints are singular n8n-ops endpoints. `preview`/`execute` require
 |---|---|---|
 | POST | `/api/acl/show` | `ACL_POLICIES_SHOW` |
 | POST | `/api/acl/preview`, `/api/acl/execute` | `ACL_POLICIES_ADD` (op=ADD) / `ACL_POLICIES_DELETE` (op=DELETE) |
+| POST | `/api/acl/bulk-preview`, `/api/acl/bulk-execute` | `ACL_POLICIES_ADD` (bulk is ADD-only) |
+| POST | `/api/acl/time-ranges`, `/api/acl/time-range-preview`, `/api/acl/time-range-add` | `ACL_POLICIES_ADD` |
+| POST | `/api/acl/time-range-delete`, `/api/acl/time-range-usage` | `ACL_POLICIES_DELETE` |
+| POST | `/api/acl/time-range-overview` | `ACL_POLICIES_SHOW` |
 | POST | `/api/route/show` | `ROUTES_SHOW` |
 | POST | `/api/route/preview`, `/api/route/execute` | `ROUTES_ADD` (op=ADD) / `ROUTES_DELETE` (op=DELETE) |
 | GET | `/api/users`, `/api/users/:id` | `ADMINISTRATION_SHOW` |

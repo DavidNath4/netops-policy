@@ -5,13 +5,13 @@
 This spec is the authoritative document for the **audit / Log Trail** subsystem:
 the `audit_logs` master table that records every security- and
 configuration-relevant event in the application, the `acl_logs` / `route_logs`
-execution-inspection detail tables that complement it, and the `/logs` page that
-presents them. The audit trail is the operational **system of record** — the
+execution-inspection detail tables that complement it, and the `/audit-trail`
+page (the "Log Trail" feature) that presents them. The audit trail is the operational **system of record** — the
 application stores no ACL/route device configuration, so these tables are the
 durable record of who did what, when, and with what outcome.
 
-Log Trail is **common access**: any authenticated user reaches `/logs` with no
-feature permission. The read endpoints are auth-only; there is no endpoint that
+Log Trail is **common access**: any authenticated user reaches `/audit-trail`
+with no feature permission. The read endpoints are auth-only; there is no endpoint that
 mutates or deletes an audit row.
 
 Related specs:
@@ -26,8 +26,8 @@ Related specs:
 
 In scope: the `audit_logs` master schema and its enums, the `acl_logs` /
 `route_logs` detail schema, the AUTH two-row model, the USER/UPDATE model, the
-redaction and best-effort write rules, the six read endpoints, and the `/logs`
-UI (columns, filters, pagination, detail modal, execution inspection). Out of
+redaction and best-effort write rules, the six read endpoints, and the
+`/audit-trail` UI (columns, filters, pagination, detail modal, execution inspection). Out of
 scope: writing device configuration (there is none), authentication and MFA
 mechanics (see authentication/), and the n8n webhook contract (see
 n8n-integration/).
@@ -48,7 +48,7 @@ n8n-integration/).
 
 #### Acceptance Criteria
 
-1. THE `/logs` page SHALL be reachable by every authenticated user WITHOUT any feature permission (common access, like the Dashboard).
+1. THE `/audit-trail` page SHALL be reachable by every authenticated user WITHOUT any feature permission (common access, like the Dashboard).
 2. THE audit read endpoints SHALL require only an authenticated session (`requireAuthenticatedUser`) and SHALL NOT require a feature permission.
 3. THE Log Trail SHALL expose NO endpoint that creates, updates, or deletes an audit row from client input; audit rows are written only as a side effect of the operations they record.
 
@@ -60,7 +60,7 @@ n8n-integration/).
 
 1. THE `audit_logs` table SHALL have the fixed columns: `id` (uuid PK), `user_id` (uuid, nullable, FK → `users.user_id` ON DELETE SET NULL), `username` (snapshot), `user_role` (snapshot), `module`, `action`, `status`, `source_ip`, `user_agent`, `change_ticket` (nullable, indexed), `correlation_id` (uuid, NOT NULL), and `created_at` (timestamptz, default now).
 2. THE `audit_logs` table SHALL have four flexible JSONB payload columns — `request_payload`, `command_payload`, `execution_payload`, `response_payload` — each nullable.
-3. THE `module` column SHALL be constrained to the `audit_module` enum: `AUTH`, `USER`, `ACL`, `ROUTE`, `N8N`.
+3. THE `module` column SHALL be constrained to the `audit_module` enum: `AUTH`, `USER`, `ACL`, `ROUTE`, `N8N`, `TIME_RANGE` (`TIME_RANGE` records the standalone Time Range page's add/delete; see Requirement 6a).
 4. THE `action` column SHALL be constrained to the `audit_action` enum IN THIS ORDER: `LOGIN`, `SHOW`, `ADD`, `DELETE`, `UPDATE`, `LOGOUT`, `MFA_VERIFY`.
 5. THE `status` column SHALL be constrained to the `audit_status` enum: `SUCCESS`, `FAILED`.
 6. THE `user_id` FK SHALL use ON DELETE SET NULL so an audit row survives the removal of its user, and `username`/`user_role` SHALL remain as point-in-time snapshots.
@@ -113,7 +113,20 @@ n8n-integration/).
 1. WHEN an admin changes a user's role or status, THE Audit_Service SHALL record a `USER`/`UPDATE` row (reusing the `UPDATE` action; no new enum value is added).
 2. THE `request_payload` SHALL carry a `kind` discriminator — `ROLE_CHANGE` or `STATUS_CHANGE` — distinguishing the two mutation types.
 3. THE acting admin SHALL be the audit actor (actor snapshot in `username`/`user_role`), and the TARGET user SHALL appear only inside the payload (`targetUserId`, `targetUsername`, and `fromRole`/`toRole` or `isActive`).
-4. THE USER/UPDATE write SHALL be best-effort and SHALL record a `FAILED` row for a rejected mutation (unknown user/role or a refused self-disable) without altering the HTTP response. *(The `/logs` UI Module → Action map currently offers only `UPDATE` under the USER module.)*
+4. THE USER/UPDATE write SHALL be best-effort and SHALL record a `FAILED` row for a rejected mutation (unknown user/role or a refused self-disable) without altering the HTTP response. *(The `/audit-trail` UI Module → Action map currently offers only `UPDATE` under the USER module.)*
+
+### Requirement 6a: The TIME_RANGE audit model (standalone Time Range page)
+
+**User Story:** As a compliance auditor, I want standalone time-range object add/delete recorded, so that managing a device's time-range catalog is attributable even though it is not an ACL rule change.
+
+The Time Range page (`/acl/time-range`) lets an engineer create and delete the device's standalone `time-range` objects directly (netops-policy-manager spec). These operations are delegated to n8n (`time/add`, `time/safeDelete` — n8n-integration spec) and recorded under the `TIME_RANGE` module. A time range created INLINE with an ACL add is NOT a `TIME_RANGE` row — it is part of the ACL operation and is recorded under `module = 'ACL'`.
+
+#### Acceptance Criteria
+
+1. WHEN an engineer adds or deletes a standalone time-range object, THE Audit_Service SHALL record ONE master `audit_logs` row with `module = 'TIME_RANGE'` and `action = 'ADD'` or `'DELETE'`, with `status` SUCCESS or FAILED from the n8n result.
+2. THE `TIME_RANGE` audit SHALL be MASTER-ONLY — it SHALL NOT write an `acl_logs` / `route_logs` detail row (there is no time-range detail table); `record()` is used, not `recordWithDetail()`.
+3. THE `request_payload` SHALL carry only the non-secret derived object (`objectName`, `date`, `time`, and the add `mode`) and the redacted command snapshot; it SHALL NEVER carry the device credentials.
+4. A duplicate-name pre-check that rejects the add BEFORE anything reaches the device (`TIME_RANGE_EXISTS`, 409) SHALL write NO audit row (nothing was attempted); only an attempted add/delete is audited.
 
 ### Requirement 7: Audit read endpoints
 
@@ -128,20 +141,20 @@ n8n-integration/).
 5. EVERY audit/detail read endpoint SHALL require only an authenticated session and SHALL return results through the standard `{ success, data }` envelope. *(A `GET /api/audit/export` endpoint also exists, returning the filtered rows for export.)*
 6. THE `AuditQuerySchema` SHALL accept `page`, `limit`, `search`, `module`, `action`, `status`, `changeTicket`, `correlationId`, `from`, and `to`; the detail-log query schemas SHALL accept `action`, `status`, `correlationId`, `from`, `to`, and (route only) `changeTicket`.
 
-### Requirement 8: The `/logs` user interface
+### Requirement 8: The `/audit-trail` user interface
 
 **User Story:** As an operator, I want a filterable table and a rich detail view, so that I can find and inspect any recorded event.
 
 #### Acceptance Criteria
 
-1. THE `/logs` master table SHALL show the columns: Time, User, Source IP, Module, Action, Status.
+1. THE `/audit-trail` master table SHALL show the columns: Time, User, Source IP, Module, Action, Status.
 2. THE filter set SHALL be: a search box (username / display name / email, applied on submit), Module, a dependent Action whose options depend on the selected Module, Status, and a From/To date range.
 3. WHEN the selected Module changes, THE page SHALL drop any Action value that is not valid for the new Module (resetting it to "All").
 4. THE list SHALL use server-side pagination. *(The current page requests `limit = 20` per page.)*
 5. THE table SHALL render inside a fixed-height, sticky-header scroll container so the page itself does not grow with the row count.
 6. WHEN a row is activated (click or Enter/Space), THE page SHALL open a detail modal showing the full audit record and each non-null JSONB payload (Request, Command, Execution, Response) pretty-printed.
 7. WHERE the selected row's Module is `ACL` or `ROUTE`, THE modal SHALL fetch the matching execution-inspection detail rows by Correlation_Id and render them as an "Execution Inspection" section, with its own loading / error / empty states.
-8. THE page SHALL render loading, empty, and error states via the shared `LoadingState` / `EmptyState` / `ErrorState` components. *(The Module filter deliberately omits `N8N`; n8n activity is folded into the ACL/ROUTE rows.)*
+8. THE page SHALL render loading, empty, and error states via the shared `LoadingState` / `EmptyState` / `ErrorState` components. *(The Module filter deliberately omits `N8N`; n8n activity is folded into the ACL/ROUTE rows. `TIME_RANGE` rows are written and returned by the read endpoints; whether the Module filter lists `TIME_RANGE` follows the current UI Module→Action map.)*
 
 ## Non-Functional Requirements
 
